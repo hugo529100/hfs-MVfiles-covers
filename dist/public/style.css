@@ -1,0 +1,33 @@
+.thumbnail.passthrough {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.5s ease-in;
+}
+
+.thumbnail.passthrough.loaded {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* 确保图标在加载过程中保持隐藏 */
+.thumbnail.passthrough:not(.loaded) {
+  display: none;
+}
+
+/* 媒体图标基础样式 */
+.media-icon.audio,
+.media-icon.video {
+/* position: relative;
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  vertical-align: middle; */
+}
+
+/* 确保默认图标样式 */
+/* 
+.icon.font-icon {
+font-family: 'Font Awesome 5 Free', 'Font Awesome 5 Pro', sans-serif;
+  font-weight: 900;
+}
+*/ 
