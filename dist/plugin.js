@@ -1,5 +1,5 @@
 exports.repo = "Hug3O/MVfiles-covers"
-exports.version = 4.2
+exports.version = 4.3
 exports.description = "Media file cover/thumbnail display with WebM video format support with simplified path configuration"
 exports.apiRequired = 8.65
 exports.frontend_js = 'main.js'
