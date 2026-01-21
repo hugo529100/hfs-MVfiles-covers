@@ -5,34 +5,37 @@
   const audioExts = ['mp3', 'flac', 'wav', 'ape', 'aac', 'ogg', 'm4a', 'alac', 'dsf', 'dsd', 'aif', 'aiff'];
   const videoExts = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'mpeg', 'mpg', 'wmv', 'rmvb', 'rm', 'dat', 'ts', 'vob', 'flv'];
   
+  // ========== 靜默化控制台日志 ==========
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  const originalDebug = console.debug;
+  const originalInfo = console.info;
+  
+  // 禁用所有前端控制台輸出
+  console.log = function() {};
+  console.warn = function() {};
+  console.error = function() {};
+  console.debug = function() {};
+  console.info = function() {};
+  
+  // 只在特定情況下恢復（用於調試）
+  const debugMode = false;
+  if (debugMode) {
+    console.log = originalLog;
+    console.warn = originalWarn;
+    console.error = originalError;
+    console.debug = originalDebug;
+    console.info = originalInfo;
+  }
+  
   // ========== 集中配置參數 ==========
   const CONFIG = {
-    // 懶加載配置 - 啟用攔截模式
-    LAZY_LOAD: {
-      ENABLED: true,                    // 是否啟用懶加載
-      INTERCEPT_ALL_IMAGES: true,       // 攔截所有圖片
-      INITIAL_DELAY: 2500,              // 初始延遲
-      FORCE_ENABLE_TIMEOUT: 5000,       // 強制啟用超時時間
-    },
-    
-    // 視窗加載範圍配置 - 極嚴格
-    VIEWPORT: {
-      ROOT_MARGIN_TOP: '0px',           // 頂部額外加載區域
-      ROOT_MARGIN_BOTTOM: '0px',       // 底部額外加載區域（預加載下一行）
-      THRESHOLD: 0.99,                  // 極低閾值
-      MAX_VISIBLE_ENTRIES: 1,           // 最大同時加載的封面數
-      CHECK_INTERVAL: 200,              // 檢查間隔
-      SCROLL_DEBOUNCE: 100,             // 滾動防抖
-      // 嚴格模式：只加載完全在視窗內的項目
-      STRICT_VISIBILITY: true,
-      VISIBILITY_THRESHOLD: 0.8,        // 可見度閾值（80%可見）
-    },
-    
     // 圖片初始化配置
     IMAGE_INIT: {
       GIF_DELAY: 250,
-      COVER_DELAY: 300,
-      REGULAR_DELAY:400,
+      COVER_DELAY: 500,
+      REGULAR_DELAY: 200,
     }
   };
 
@@ -42,52 +45,14 @@
   const processingUrls = new Set();
   const entryFinalUrlCache = new WeakMap();
   const entryDecisionCache = new WeakMap();
-  const entrySuccessPathCache = new WeakMap();
+  const loadedImagesCache = new Map();
   
-  // ========== 關鍵：圖片攔截緩存 ==========
-  const imageElementsCache = new Map();      // 所有圖片元素緩存
-  const pendingImageLoads = new Map();       // 待加載的圖片
-  const activeImageLoads = new Set();        // 正在加載的圖片
-  
-  // ========== 狀態控制 ==========
-  let isPluginEnabled = false;
-  let isInitialized = false;
-  let lazyLoadManager = null;
-  let imageInterceptor = null;
-  let scrollHandler = null;
-  let visibilityChecker = null;
-  let enableTimeout = null;
+  // ========== HFS 狀態監聽 ==========
+  let currentPath = window.location.pathname;
+  let isNavigating = false;
+  let navigationTimeout = null;
 
   // ========== 工具函數 ==========
-  function debounce(func, wait) {
-    let timeout;
-    return function executedFunction(...args) {
-      clearTimeout(timeout);
-      timeout = setTimeout(() => func(...args), wait);
-    };
-  }
-
-  function throttle(func, limit) {
-    let inThrottle;
-    return function() {
-      const args = arguments;
-      const context = this;
-      if (!inThrottle) {
-        func.apply(context, args);
-        inThrottle = true;
-        setTimeout(() => inThrottle = false, limit);
-      }
-    };
-  }
-
-  function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  function randomDelay(min, max) {
-    return delay(Math.floor(Math.random() * (max - min + 1)) + min);
-  }
-
   function normalizeUrlForKey(url) {
     try {
       const u = new URL(url, location.origin);
@@ -100,6 +65,16 @@
   function getEntryKey(entry) {
     return `${entry.uri}|${entry.name}|${entry.ext}`;
   }
+  
+  function getImageCacheKey(imgElement) {
+    if (!imgElement) return null;
+    const src = imgElement.src || imgElement.dataset?.originalSrc;
+    const parent = imgElement.closest('[data-uri], [data-name]');
+    const uri = parent?.dataset?.uri;
+    const name = parent?.dataset?.name;
+    if (!src || (!uri && !name)) return null;
+    return `${src}|${uri}|${name}`;
+  }
 
   // ========== 檢查是否為原生GIF文件 ==========
   function isNativeGifFile(entry) {
@@ -111,437 +86,10 @@
       return false;
     }
     
-    if (entry.uri && entry.uri.toLowerCase().endsWith('.gif')) {
-      return true;
-    }
-    
     return true;
   }
 
-  // ========== 粗暴的圖片攔截器 ==========
-  class ImageInterceptor {
-    constructor() {
-      this.interceptedImages = new Map();
-      this.observer = null;
-      this.init();
-    }
-    
-    init() {
-      if (!CONFIG.LAZY_LOAD.INTERCEPT_ALL_IMAGES) return;
-      
-      // 攔截所有現有的圖片元素
-      this.interceptExistingImages();
-      
-      // 設置MutationObserver監聽新圖片
-      this.setupMutationObserver();
-      
-      // 攔截Image構造函數
-      this.interceptImageConstructor();
-    }
-    
-    interceptExistingImages() {
-      const allImages = document.querySelectorAll('img');
-      allImages.forEach(img => {
-        this.processImageElement(img);
-      });
-    }
-    
-    processImageElement(img) {
-      // 跳過已經處理過的圖片
-      if (img.dataset.intercepted === 'true') return;
-      
-      const src = img.src;
-      if (!src || src.trim() === '') return;
-      
-      // 檢查是否為封面圖
-      const isCover = src.includes('/cache/covers/') || src.includes('/cache/videothumbnail/');
-      if (!isCover) return;
-      
-      // 獲取對應的entry
-      const entry = this.findEntryForImage(img);
-      if (!entry) return;
-      
-      // 攔截這個圖片
-      this.interceptImage(img, entry);
-    }
-    
-    findEntryForImage(img) {
-      // 從圖片元素向上查找對應的entry
-      let element = img;
-      for (let i = 0; i < 5; i++) {
-        if (!element.parentElement) break;
-        element = element.parentElement;
-        
-        const uri = element.dataset?.uri;
-        const name = element.dataset?.name;
-        
-        if (uri || name) {
-          // 嘗試從全局註冊的entries中查找
-          if (window.MediaCoverPlugin?.registeredEntries) {
-            const found = window.MediaCoverPlugin.registeredEntries.find(
-              e => e.entry.uri === uri || e.entry.name === name
-            );
-            if (found) return found.entry;
-          }
-        }
-      }
-      return null;
-    }
-    
-    interceptImage(img, entry) {
-      const originalSrc = img.src;
-      const imgKey = `${originalSrc}|${getEntryKey(entry)}`;
-      
-      // 保存原始信息
-      img.dataset.originalSrc = originalSrc;
-      img.dataset.intercepted = 'true';
-      img.dataset.entryKey = getEntryKey(entry);
-      
-      // 移除src，防止自動加載
-      img.removeAttribute('src');
-      img.style.opacity = '0';
-      
-      // 保存到緩存
-      this.interceptedImages.set(imgKey, {
-        img,
-        entry,
-        originalSrc,
-        loaded: false,
-        loading: false
-      });
-      
-      // 註冊到圖片元素緩存
-      imageElementsCache.set(imgKey, img);
-    }
-    
-    setupMutationObserver() {
-      this.observer = new MutationObserver((mutations) => {
-        mutations.forEach((mutation) => {
-          if (mutation.type === 'childList') {
-            mutation.addedNodes.forEach((node) => {
-              if (node.nodeType === 1) { // Element node
-                if (node.tagName === 'IMG') {
-                  this.processImageElement(node);
-                } else {
-                  const images = node.querySelectorAll('img');
-                  images.forEach(img => this.processImageElement(img));
-                }
-              }
-            });
-          }
-        });
-      });
-      
-      this.observer.observe(document.body, {
-        childList: true,
-        subtree: true
-      });
-    }
-    
-    interceptImageConstructor() {
-      const OriginalImage = window.Image;
-      
-      window.Image = function() {
-        const img = new OriginalImage();
-        
-        Object.defineProperty(img, 'src', {
-          get() {
-            return this._src || '';
-          },
-          set(value) {
-            this._src = value;
-            
-            // 檢查是否為封面圖
-            const isCover = value.includes('/cache/covers/') || value.includes('/cache/videothumbnail/');
-            if (isCover) {
-              // 延遲設置實際src
-              setTimeout(() => {
-                if (img.parentElement) {
-                  img.dataset.originalSrc = value;
-                  img.style.opacity = '0';
-                }
-              }, 0);
-            } else {
-              // 非封面圖，正常設置
-              img.setAttribute('src', value);
-            }
-          }
-        });
-        
-        return img;
-      };
-      
-      window.Image.prototype = OriginalImage.prototype;
-    }
-    
-    loadImage(imgKey) {
-      const data = this.interceptedImages.get(imgKey);
-      if (!data || data.loaded || data.loading) return false;
-      
-      data.loading = true;
-      activeImageLoads.add(imgKey);
-      
-      // 檢查並發限制
-      if (activeImageLoads.size > CONFIG.VIEWPORT.MAX_VISIBLE_ENTRIES) {
-        data.loading = false;
-        activeImageLoads.delete(imgKey);
-        return false;
-      }
-      
-      // 實際加載圖片
-      const loadPromise = this.loadImageSource(data.img, data.entry, data.originalSrc);
-      
-      loadPromise.then(() => {
-        data.loaded = true;
-        data.loading = false;
-        activeImageLoads.delete(imgKey);
-        data.img.style.opacity = '1';
-        data.img.classList.add('loaded');
-      }).catch(() => {
-        data.loading = false;
-        activeImageLoads.delete(imgKey);
-        data.img.style.opacity = '0.3';
-      });
-      
-      return true;
-    }
-    
-    async loadImageSource(img, entry, src) {
-      // 優先使用緩存的成功路徑
-      const successPath = entrySuccessPathCache.get(entry);
-      const urlToLoad = successPath || src;
-      
-      return new Promise((resolve, reject) => {
-        const tempImg = new Image();
-        tempImg.onload = () => {
-          // 驗證成功後設置實際src
-          img.src = urlToLoad;
-          img.onload = () => {
-            thumbCache.add(entry);
-            if (urlToLoad !== src) {
-              entrySuccessPathCache.set(entry, urlToLoad);
-            }
-            resolve();
-          };
-          img.onerror = reject;
-        };
-        tempImg.onerror = () => {
-          // 當前路徑失敗，嘗試其他路徑
-          this.tryAlternativePaths(img, entry, src).then(resolve).catch(reject);
-        };
-        tempImg.src = urlToLoad;
-      });
-    }
-    
-    async tryAlternativePaths(img, entry, originalSrc) {
-      const allUrls = getAllPossibleCoverUrls(entry);
-      
-      for (const url of allUrls) {
-        if (url === originalSrc) continue;
-        
-        const normalizedUrl = normalizeUrlForKey(url);
-        if (errorCache.has(normalizedUrl)) continue;
-        
-        try {
-          await new Promise((resolve, reject) => {
-            const testImg = new Image();
-            testImg.onload = () => {
-              img.src = url;
-              img.onload = () => {
-                thumbCache.add(entry);
-                entrySuccessPathCache.set(entry, url);
-                resolve();
-              };
-              img.onerror = reject;
-            };
-            testImg.onerror = reject;
-            testImg.src = url;
-          });
-          return; // 成功加載，退出循環
-        } catch (e) {
-          errorCache.add(normalizedUrl);
-          continue;
-        }
-      }
-      
-      throw new Error('All image paths failed');
-    }
-    
-    checkVisibleImages() {
-      if (!isPluginEnabled) return;
-      
-      const viewportHeight = window.innerHeight;
-      const viewportWidth = window.innerWidth;
-      const scrollTop = window.scrollY;
-      const scrollBottom = scrollTop + viewportHeight;
-      
-      let loadedCount = 0;
-      
-      this.interceptedImages.forEach((data, imgKey) => {
-        if (data.loaded || data.loading) {
-          loadedCount++;
-          return;
-        }
-        
-        // 檢查並發限制
-        if (loadedCount >= CONFIG.VIEWPORT.MAX_VISIBLE_ENTRIES) {
-          return;
-        }
-        
-        try {
-          const rect = data.img.getBoundingClientRect();
-          const elementTop = rect.top + scrollTop;
-          const elementBottom = rect.bottom + scrollTop;
-          
-          // 嚴格檢查：元素必須在視窗內
-          const isInViewport = (
-            elementBottom >= scrollTop &&
-            elementTop <= scrollBottom &&
-            rect.left >= 0 &&
-            rect.right <= viewportWidth
-          );
-          
-          if (CONFIG.VIEWPORT.STRICT_VISIBILITY) {
-            // 檢查可見面積比例
-            const visibleHeight = Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0);
-            const visibleWidth = Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0);
-            const elementArea = rect.height * rect.width;
-            const visibleArea = visibleHeight * visibleWidth;
-            const visibilityRatio = elementArea > 0 ? visibleArea / elementArea : 0;
-            
-            if (isInViewport && visibilityRatio >= CONFIG.VIEWPORT.VISIBILITY_THRESHOLD) {
-              if (this.loadImage(imgKey)) {
-                loadedCount++;
-              }
-            }
-          } else {
-            if (isInViewport) {
-              if (this.loadImage(imgKey)) {
-                loadedCount++;
-              }
-            }
-          }
-        } catch (e) {}
-      });
-    }
-    
-    destroy() {
-      if (this.observer) {
-        this.observer.disconnect();
-      }
-      
-      // 恢復所有攔截的圖片
-      this.interceptedImages.forEach(data => {
-        if (data.img && data.img.dataset.originalSrc) {
-          data.img.src = data.img.dataset.originalSrc;
-          data.img.style.opacity = '1';
-        }
-      });
-      
-      this.interceptedImages.clear();
-    }
-  }
-
-  // ========== 可視性檢查器 ==========
-  class VisibilityChecker {
-    constructor() {
-      this.entries = new Map();
-      this.observer = null;
-      this.init();
-    }
-    
-    init() {
-      if ('IntersectionObserver' in window) {
-        const rootMargin = `${CONFIG.VIEWPORT.ROOT_MARGIN_TOP} 0px ${CONFIG.VIEWPORT.ROOT_MARGIN_BOTTOM} 0px`;
-        
-        this.observer = new IntersectionObserver(
-          (entries) => {
-            this.handleIntersection(entries);
-          },
-          {
-            root: null,
-            rootMargin: rootMargin,
-            threshold: CONFIG.VIEWPORT.THRESHOLD
-          }
-        );
-      }
-    }
-    
-    handleIntersection(entries) {
-      entries.forEach(entry => {
-        const entryId = entry.target.dataset.visibilityId;
-        if (entry.isIntersecting) {
-          this.loadEntry(entryId);
-        }
-      });
-    }
-    
-    registerEntry(entry, element) {
-      if (isNativeGifFile(entry)) return;
-      
-      const entryId = getEntryKey(entry);
-      
-      if (this.entries.has(entryId)) return;
-      
-      this.entries.set(entryId, {
-        entry,
-        element,
-        loaded: false
-      });
-      
-      element.dataset.visibilityId = entryId;
-      
-      if (this.observer && element instanceof Element) {
-        this.observer.observe(element);
-      }
-    }
-    
-    loadEntry(entryId) {
-      const data = this.entries.get(entryId);
-      if (!data || data.loaded) return;
-      
-      data.loaded = true;
-      
-      // 觸發圖片加載
-      if (imageInterceptor) {
-        // 查找對應的圖片元素
-        const imgElements = document.querySelectorAll(`img[data-entry-key="${entryId}"]`);
-        imgElements.forEach(img => {
-          const imgKey = `${img.dataset.originalSrc}|${entryId}`;
-          imageInterceptor.loadImage(imgKey);
-        });
-      }
-    }
-    
-    destroy() {
-      if (this.observer) {
-        this.observer.disconnect();
-      }
-      this.entries.clear();
-    }
-  }
-
-  // ========== 封面URL處理 ==========
-  function isImagesPathEnabled(entry) {
-    if (!pluginConfig.enableImagesPath) return false;
-    
-    let imagesPathFolders = pluginConfig.imagesPathFolders;
-    
-    if (!imagesPathFolders) return true;
-    if (!Array.isArray(imagesPathFolders)) {
-        if (typeof imagesPathFolders === 'string') {
-            imagesPathFolders = [imagesPathFolders];
-        } else {
-            return true;
-        }
-    }
-    
-    if (imagesPathFolders.length === 0) return true;
-    
-    const entryPath = entry.uri ? entry.uri.replace(/[^/]+$/, '') : '';
-    return imagesPathFolders.some(folder => entryPath.startsWith(folder));
-  }
-
+  // ========== 單一路徑模式：封面URL處理 ==========
   function getAllPossibleCoverUrls(entry) {
     if (isNativeGifFile(entry)) return [];
     
@@ -554,38 +102,43 @@
     const baseUri = entry.uri.replace(/[^/]+$/, '');
     const name = encodeURIComponent(entry.name.replace(/\.[^/.]+$/, ''));
     const format = entry.coverExt || pluginConfig.videoThumbFormat || 'jpg';
-
+    
     const urls = [];
     
-    if (isAudio) {
-      urls.push(`${baseUri}cache/covers/${name}.jpg`);
+    // 單一路徑模式：根據具體設置返回路徑
+    if (pluginConfig.enableGraftMode) {
+      // 嫁接模式：使用自定義路徑
+      if (isAudio) {
+        // 檢查是否啟用音樂封面嫁接
+        if (pluginConfig.graftMusicCovers !== false) { // 默認true
+          urls.push(`${pluginConfig.graftPath}${baseUri}cache/covers/${name}.jpg`);
+        } else {
+          // 禁用音樂嫁接，使用原始路徑
+          urls.push(`${baseUri}cache/covers/${name}.jpg`);
+        }
+      } else if (isVideo) {
+        // 檢查是否啟用視頻封面嫁接
+        if (pluginConfig.graftVideoCovers !== false) { // 默認true
+          urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.${format}`);
+        } else {
+          // 禁用視頻嫁接，使用原始路徑
+          urls.push(`${baseUri}cache/videothumbnail/${name}.${format}`);
+        }
+      }
+    } else {
+      // 普通模式：使用原始路徑
+      if (isAudio) {
+        urls.push(`${baseUri}cache/covers/${name}.jpg`);
+      } else if (isVideo) {
+        urls.push(`${baseUri}cache/videothumbnail/${name}.${format}`);
+      }
     }
     
-    if (isVideo) {
-      const useImagesPath = pluginConfig.enableImagesPath && isImagesPathEnabled(entry);
-      
-      const successPath = entrySuccessPathCache.get(entry);
-      if (successPath) {
-        urls.unshift(successPath);
-      }
-      
-      if (useImagesPath) {
-        urls.push(`/images/cache${baseUri}cache/videothumbnail/${name}.${format}`);
-      }
-      
-      urls.push(`${baseUri}cache/videothumbnail/${name}.${format}`);
-    }
-    
-    return [...new Set(urls)];
+    return urls;
   }
 
   function getCurrentCoverUrlSync(entry) {
     if (isNativeGifFile(entry)) return null;
-    
-    const successPath = entrySuccessPathCache.get(entry);
-    if (successPath) {
-      return successPath;
-    }
     
     if (entryFinalUrlCache.has(entry)) {
       return entryFinalUrlCache.get(entry);
@@ -606,7 +159,9 @@
       return null;
     }
     
-    return decision.allUrls[decision.currentIndex];
+    const url = decision.allUrls[decision.currentIndex];
+    entryFinalUrlCache.set(entry, url);
+    return url;
   }
 
   function markCurrentUrlFailed(entry, failedUrl) {
@@ -618,11 +173,7 @@
     const normalizedUrl = normalizeUrlForKey(failedUrl);
     decision.triedUrls.add(normalizedUrl);
     decision.currentIndex++;
-    
-    const successPath = entrySuccessPathCache.get(entry);
-    if (successPath && normalizeUrlForKey(successPath) === normalizedUrl) {
-      entrySuccessPathCache.delete(entry);
-    }
+    entryFinalUrlCache.delete(entry);
   }
 
   // ========== 事件處理 ==========
@@ -643,65 +194,95 @@
     }
   }
 
+  // ========== 監聽HFS導航事件 ==========
+  function setupNavigationListener() {
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    
+    history.pushState = function(...args) {
+      originalPushState.apply(this, args);
+      handleNavigation();
+    };
+    
+    history.replaceState = function(...args) {
+      originalReplaceState.apply(this, args);
+      handleNavigation();
+    };
+    
+    window.addEventListener('popstate', handleNavigation);
+    
+    HFS.onEvent('beforeNavigate', () => {
+      isNavigating = true;
+    });
+    
+    HFS.onEvent('navigated', () => {
+      isNavigating = false;
+      currentPath = window.location.pathname;
+      
+      // 清理緩存
+      errorCache.clear();
+      loadedImagesCache.clear();
+      processingUrls.clear();
+      
+      // 清理條目緩存
+      const entries = window.MediaCoverPlugin?.registeredEntries || [];
+      entries.forEach(({ entry }) => {
+        entryFinalUrlCache.delete(entry);
+        entryDecisionCache.delete(entry);
+      });
+    });
+  }
+  
+  function handleNavigation() {
+    if (isNavigating) return;
+    
+    const newPath = window.location.pathname;
+    if (newPath === currentPath) return;
+    
+    isNavigating = true;
+    currentPath = newPath;
+    
+    if (navigationTimeout) {
+      clearTimeout(navigationTimeout);
+    }
+    
+    navigationTimeout = setTimeout(() => {
+      isNavigating = false;
+      
+      // 清理緩存
+      errorCache.clear();
+      loadedImagesCache.clear();
+      processingUrls.clear();
+      
+      // 清理條目緩存
+      const entries = window.MediaCoverPlugin?.registeredEntries || [];
+      entries.forEach(({ entry }) => {
+        entryFinalUrlCache.delete(entry);
+        entryDecisionCache.delete(entry);
+      });
+    }, 500);
+  }
+
   // ========== 系統初始化 ==========
   function initializeSystem() {
-    if (isInitialized) return;
+    setupNavigationListener();
     
-    isInitialized = true;
-    
-    // 首先攔截所有圖片
-    imageInterceptor = new ImageInterceptor();
-    
-    // 然後啟用可視性檢查
-    lazyLoadManager = new VisibilityChecker();
-    
-    // 設置滾動檢查
-    setupScrollChecker();
-    
-    // 延遲啟用加載
+    // 註冊所有現有的媒體條目
     setTimeout(() => {
-      enablePlugin();
-    }, CONFIG.LAZY_LOAD.INITIAL_DELAY);
-  }
-
-  function setupScrollChecker() {
-    scrollHandler = debounce(() => {
-      if (imageInterceptor && isPluginEnabled) {
-        imageInterceptor.checkVisibleImages();
-      }
-    }, CONFIG.VIEWPORT.SCROLL_DEBOUNCE);
-    
-    window.addEventListener('scroll', scrollHandler, { passive: true });
-    window.addEventListener('resize', scrollHandler, { passive: true });
-    
-    // 定時檢查可見圖片
-    setInterval(() => {
-      if (imageInterceptor && isPluginEnabled) {
-        imageInterceptor.checkVisibleImages();
-      }
-    }, CONFIG.VIEWPORT.CHECK_INTERVAL);
-  }
-
-  function enablePlugin() {
-    if (isPluginEnabled) return;
-    
-    isPluginEnabled = true;
-    
-    // 初始檢查一次可見圖片
-    if (imageInterceptor) {
-      setTimeout(() => {
-        imageInterceptor.checkVisibleImages();
-      }, 500);
-    }
-    
-    // 註冊已經存在的條目
-    if (window.MediaCoverPlugin?.registeredEntries) {
-      window.MediaCoverPlugin.registeredEntries.forEach(({ entry, element }) => {
-        if (lazyLoadManager && !isNativeGifFile(entry)) {
-          lazyLoadManager.registerEntry(entry, element);
+      const mediaElements = document.querySelectorAll('.icon, .entry-icon, .media-icon, [class*="icon"]');
+      mediaElements.forEach(element => {
+        const parent = element.closest('[data-uri], [data-name]');
+        if (parent && (parent.dataset.uri || parent.dataset.name)) {
+          // 這裡不需要做任何懶加載處理，只註冊條目
+          if (!window.MediaCoverPlugin) {
+            window.MediaCoverPlugin = {};
+          }
+          if (!window.MediaCoverPlugin.registeredEntries) {
+            window.MediaCoverPlugin.registeredEntries = [];
+          }
         }
       });
-    }
+    }, 500);
   }
 
   // 頁面加載後初始化
@@ -712,13 +293,6 @@
   } else {
     setTimeout(initializeSystem, 500);
   }
-
-  // 設置超時強制啟用
-  enableTimeout = setTimeout(() => {
-    if (!isPluginEnabled) {
-      enablePlugin();
-    }
-  }, CONFIG.LAZY_LOAD.FORCE_ENABLE_TIMEOUT);
 
   // ========== React 圖片組件 ==========
   function ImgFallback({ fallback, tag = 'img', props, entry }) {
@@ -773,10 +347,6 @@
         }
         
         window.MediaCoverPlugin.registeredEntries.push({ entry, element });
-        
-        if (lazyLoadManager && !isNativeGifFile(entry)) {
-          lazyLoadManager.registerEntry(entry, element);
-        }
       }
       
       initTimeoutRef.current = setTimeout(() => {
@@ -796,7 +366,6 @@
               return;
             }
 
-            // 設置占位符URL，實際加載由攔截器控制
             if (isActive) {
               setLocalSrc(currentUrl);
             }
@@ -818,11 +387,18 @@
       
       try {
         const el = e.target;
-        
         setTimeout(() => {
           if (mountedRef.current) {
             setLoaded(true);
             el.classList.add('loaded');
+            
+            const cacheKey = getImageCacheKey(el);
+            if (cacheKey) {
+              loadedImagesCache.set(cacheKey, {
+                src: el.src,
+                timestamp: Date.now()
+              });
+            }
           }
         }, 100);
       } catch (error) {}
@@ -858,7 +434,7 @@
       className: `${props.className || ''} thumbnail passthrough ${loaded ? 'loaded' : 'loading'} ${imageType}`,
       onLoad: handleLoad,
       onError: handleError,
-      loading: 'lazy',
+      loading: 'eager', // 改為立即加載
       decoding: 'async'
     });
   }
@@ -885,10 +461,6 @@
             }
             
             window.MediaCoverPlugin.registeredEntries.push({ entry, element: element });
-            
-            if (lazyLoadManager && !isNativeGifFile(entry)) {
-              lazyLoadManager.registerEntry(entry, element);
-            }
             break;
           }
         }
@@ -930,7 +502,7 @@
       props: {
         ...props,
         className: `${props.className} thumbnail passthrough`,
-        loading: 'lazy',
+        loading: 'eager', // 改為立即加載
         decoding: 'async',
       },
       entry: entry,
@@ -940,21 +512,19 @@
   // ========== 清理函數 ==========
   window.addEventListener('beforeunload', () => {
     try {
-      if (imageInterceptor) {
-        imageInterceptor.destroy();
+      if (navigationTimeout) {
+        clearTimeout(navigationTimeout);
       }
       
-      if (lazyLoadManager) {
-        lazyLoadManager.destroy();
-      }
+      // 清理所有緩存
+      errorCache.clear();
+      loadedImagesCache.clear();
+      processingUrls.clear();
+      entryFinalUrlCache = new WeakMap();
+      entryDecisionCache = new WeakMap();
       
-      if (scrollHandler) {
-        window.removeEventListener('scroll', scrollHandler);
-        window.removeEventListener('resize', scrollHandler);
-      }
-      
-      if (enableTimeout) {
-        clearTimeout(enableTimeout);
+      if (window.MediaCoverPlugin) {
+        window.MediaCoverPlugin.registeredEntries = [];
       }
     } catch (error) {}
   });
