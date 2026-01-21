@@ -46,6 +46,7 @@
   const entryFinalUrlCache = new WeakMap();
   const entryDecisionCache = new WeakMap();
   const loadedImagesCache = new Map();
+  const clickLock = new WeakMap(); // 防止重复点击
   
   // ========== HFS 狀態監聽 ==========
   let currentPath = window.location.pathname;
@@ -107,22 +108,22 @@
     
     // 單一路徑模式：根據具體設置返回路徑
     if (pluginConfig.enableGraftMode) {
-      // 嫁接模式：使用自定義路徑
+      // 嫁接模式：强制指向自定義路徑，無回退機制
       if (isAudio) {
         // 檢查是否啟用音樂封面嫁接
         if (pluginConfig.graftMusicCovers !== false) { // 默認true
           urls.push(`${pluginConfig.graftPath}${baseUri}cache/covers/${name}.jpg`);
         } else {
-          // 禁用音樂嫁接，使用原始路徑
-          urls.push(`${baseUri}cache/covers/${name}.jpg`);
+          // 如果禁用音樂嫁接，就不使用任何封面
+          return [];
         }
       } else if (isVideo) {
         // 檢查是否啟用視頻封面嫁接
         if (pluginConfig.graftVideoCovers !== false) { // 默認true
           urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.${format}`);
         } else {
-          // 禁用視頻嫁接，使用原始路徑
-          urls.push(`${baseUri}cache/videothumbnail/${name}.${format}`);
+          // 如果禁用視頻嫁接，就不使用任何封面
+          return [];
         }
       }
     } else {
@@ -134,7 +135,7 @@
       }
     }
     
-    return urls;
+    return urls; // 在嫁接模式下，這裡只返回一個URL（強制指向）
   }
 
   function getCurrentCoverUrlSync(entry) {
@@ -146,6 +147,10 @@
 
     if (!entryDecisionCache.has(entry)) {
       const allUrls = getAllPossibleCoverUrls(entry);
+      // 嫁接模式下只有一個URL，直接設置為最終URL
+      if (allUrls.length === 1) {
+        entryFinalUrlCache.set(entry, allUrls[0]);
+      }
       entryDecisionCache.set(entry, {
         allUrls: allUrls,
         currentIndex: 0,
@@ -160,7 +165,10 @@
     }
     
     const url = decision.allUrls[decision.currentIndex];
-    entryFinalUrlCache.set(entry, url);
+    // 只在非嫁接模式或有多個URL時緩存
+    if (!pluginConfig.enableGraftMode || decision.allUrls.length > 1) {
+      entryFinalUrlCache.set(entry, url);
+    }
     return url;
   }
 
@@ -174,10 +182,26 @@
     decision.triedUrls.add(normalizedUrl);
     decision.currentIndex++;
     entryFinalUrlCache.delete(entry);
+    
+    // 在嫁接模式下，如果第一個URL失敗，就沒有其他URL可嘗試
+    if (pluginConfig.enableGraftMode && decision.currentIndex >= decision.allUrls.length) {
+      // 可以考慮在這裡設置一個標記，避免重複嘗試
+      decision.triedUrls.clear(); // 清理已嘗試的URL
+    }
   }
 
   // ========== 事件處理 ==========
   function handleMediaClick(entry, e) {
+    // 防止重复点击
+    if (clickLock.has(entry)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    
+    clickLock.set(entry, true);
+    setTimeout(() => clickLock.delete(entry), 1000);
+    
     e.preventDefault();
     e.stopPropagation();
     const ext = entry.ext?.toLowerCase();
@@ -223,6 +247,7 @@
       errorCache.clear();
       loadedImagesCache.clear();
       processingUrls.clear();
+      clickLock.clear();
       
       // 清理條目緩存
       const entries = window.MediaCoverPlugin?.registeredEntries || [];
@@ -253,6 +278,7 @@
       errorCache.clear();
       loadedImagesCache.clear();
       processingUrls.clear();
+      clickLock.clear();
       
       // 清理條目緩存
       const entries = window.MediaCoverPlugin?.registeredEntries || [];
@@ -413,7 +439,12 @@
 
         if (imageType === 'cover' || imageType === 'cover-gif') {
           markCurrentUrlFailed(entry, localSrc);
-          setRetryKey(prev => prev + 1);
+          // 在嫁接模式下，如果URL失敗，就直接顯示fallback，不重試
+          if (!pluginConfig.enableGraftMode) {
+            setRetryKey(prev => prev + 1);
+          } else {
+            setErr(true);
+          }
         } else {
           setErr(true);
         }
@@ -520,6 +551,7 @@
       errorCache.clear();
       loadedImagesCache.clear();
       processingUrls.clear();
+      clickLock.clear();
       entryFinalUrlCache = new WeakMap();
       entryDecisionCache = new WeakMap();
       
