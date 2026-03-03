@@ -2,10 +2,42 @@
 {
   const { h } = HFS;
   const pluginConfig = HFS.getPluginConfig?.() || {};
-  const audioExts = ['mp3', 'flac', 'wav', 'ape', 'aac', 'ogg', 'm4a', 'alac', 'dsf', 'dsd', 'aif', 'aiff'];
+  const audioExts = ['mp3', 'flac', 'wav', 'ape', 'aac', 'ogg', 'm4a', 'alac', 'dsf', 'dsd', 'aif', 'aiff', 'opus'];
   const videoExts = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'mpeg', 'mpg', 'wmv', 'rmvb', 'rm', 'dat', 'ts', 'vob', 'flv'];
   
-  // ========== 靜默化控制台日志 ==========
+  // ========== 封面加載開關設置 ==========
+  const STORAGE_KEY_COVER_LOAD = 'hfs_media_cover_load_enabled';
+  const COVER_TOGGLE_ID = 'media-cover-load-toggle';
+  
+  // 檢查 localStorage 是否支持
+  const isLocalStorageSupported = () => {
+    try {
+      localStorage.setItem('test', '1');
+      localStorage.removeItem('test');
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  // 獲取封面加載狀態（默認為 true - 開啟）
+  const getCoverLoadState = () => {
+    if (!isLocalStorageSupported()) return true;
+    const val = localStorage.getItem(STORAGE_KEY_COVER_LOAD);
+    return val === null ? true : val === 'true';
+  };
+
+  // 儲存封面加載狀態
+  const setCoverLoadState = (value) => {
+    if (isLocalStorageSupported()) {
+      localStorage.setItem(STORAGE_KEY_COVER_LOAD, value ? 'true' : 'false');
+    }
+  };
+
+  // 全局變量來保存當前狀態
+  let coverLoadEnabled = getCoverLoadState();
+
+  // ========== 靜默化控制台日誌 ==========
   const originalLog = console.log;
   const originalWarn = console.warn;
   const originalError = console.error;
@@ -34,8 +66,8 @@
     // 圖片初始化配置
     IMAGE_INIT: {
       GIF_DELAY: 250,
-      COVER_DELAY: 500,
-      REGULAR_DELAY: 200,
+      COVER_DELAY: 300,
+      REGULAR_DELAY: 250,
     }
   };
 
@@ -43,10 +75,9 @@
   const errorCache = new Set();
   const thumbCache = new WeakSet();
   const processingUrls = new Set();
-  const entryFinalUrlCache = new WeakMap();
-  const entryDecisionCache = new WeakMap();
+  let entryFinalUrlCache = new WeakMap();
+  let entryDecisionCache = new WeakMap();
   const loadedImagesCache = new Map();
-  const clickLock = new WeakMap(); // 防止重复点击
   
   // ========== HFS 狀態監聽 ==========
   let currentPath = window.location.pathname;
@@ -108,7 +139,7 @@
     
     // 單一路徑模式：根據具體設置返回路徑
     if (pluginConfig.enableGraftMode) {
-      // 嫁接模式：强制指向自定義路徑，無回退機制
+      // 嫁接模式：強制指向自定義路徑，無回退機制
       if (isAudio) {
         // 檢查是否啟用音樂封面嫁接
         if (pluginConfig.graftMusicCovers !== false) { // 默認true
@@ -135,7 +166,7 @@
       }
     }
     
-    return urls; // 在嫁接模式下，這裡只返回一個URL（強制指向）
+    return urls;
   }
 
   function getCurrentCoverUrlSync(entry) {
@@ -147,7 +178,6 @@
 
     if (!entryDecisionCache.has(entry)) {
       const allUrls = getAllPossibleCoverUrls(entry);
-      // 嫁接模式下只有一個URL，直接設置為最終URL
       if (allUrls.length === 1) {
         entryFinalUrlCache.set(entry, allUrls[0]);
       }
@@ -165,7 +195,6 @@
     }
     
     const url = decision.allUrls[decision.currentIndex];
-    // 只在非嫁接模式或有多個URL時緩存
     if (!pluginConfig.enableGraftMode || decision.allUrls.length > 1) {
       entryFinalUrlCache.set(entry, url);
     }
@@ -183,25 +212,13 @@
     decision.currentIndex++;
     entryFinalUrlCache.delete(entry);
     
-    // 在嫁接模式下，如果第一個URL失敗，就沒有其他URL可嘗試
     if (pluginConfig.enableGraftMode && decision.currentIndex >= decision.allUrls.length) {
-      // 可以考慮在這裡設置一個標記，避免重複嘗試
-      decision.triedUrls.clear(); // 清理已嘗試的URL
+      decision.triedUrls.clear();
     }
   }
 
   // ========== 事件處理 ==========
   function handleMediaClick(entry, e) {
-    // 防止重复点击
-    if (clickLock.has(entry)) {
-      e.preventDefault();
-      e.stopPropagation();
-      return;
-    }
-    
-    clickLock.set(entry, true);
-    setTimeout(() => clickLock.delete(entry), 1000);
-    
     e.preventDefault();
     e.stopPropagation();
     const ext = entry.ext?.toLowerCase();
@@ -216,6 +233,42 @@
     } else {
       HFS.fileShow(entry, { startPlaying: true });
     }
+  }
+
+  // ========== 在Options界面中添加開關 ==========
+  function insertCoverLoadToggle() {
+    const optionsDialog = document.querySelector('.dialog[aria-modal="true"]');
+    if (!optionsDialog || document.getElementById(COVER_TOGGLE_ID)) return;
+
+    const themeSelect = document.getElementById('option-theme');
+    if (!themeSelect) return;
+
+    // 創建簡單的開關元素
+    const toggleHTML = `
+      <div id="${COVER_TOGGLE_ID}" style="display:block;margin-top:1em">
+        <label style="display:block;cursor:pointer">
+          <input type="checkbox" id="media-cover-load-checkbox">
+          Show Media Cover Images
+        </label>
+      </div>
+    `;
+
+    // 插入到theme選擇器後面
+    themeSelect.insertAdjacentHTML('afterend', toggleHTML);
+
+    // 設置初始狀態
+    const checkbox = document.getElementById('media-cover-load-checkbox');
+    checkbox.checked = coverLoadEnabled;
+
+    // 添加事件監聽
+    checkbox.addEventListener('change', (e) => {
+      const newState = e.target.checked;
+      coverLoadEnabled = newState;
+      setCoverLoadState(coverLoadEnabled);
+      
+      // 立即刷新列表
+      HFS.reloadList();
+    });
   }
 
   // ========== 監聽HFS導航事件 ==========
@@ -242,19 +295,6 @@
     HFS.onEvent('navigated', () => {
       isNavigating = false;
       currentPath = window.location.pathname;
-      
-      // 清理緩存
-      errorCache.clear();
-      loadedImagesCache.clear();
-      processingUrls.clear();
-      clickLock.clear();
-      
-      // 清理條目緩存
-      const entries = window.MediaCoverPlugin?.registeredEntries || [];
-      entries.forEach(({ entry }) => {
-        entryFinalUrlCache.delete(entry);
-        entryDecisionCache.delete(entry);
-      });
     });
   }
   
@@ -273,19 +313,6 @@
     
     navigationTimeout = setTimeout(() => {
       isNavigating = false;
-      
-      // 清理緩存
-      errorCache.clear();
-      loadedImagesCache.clear();
-      processingUrls.clear();
-      clickLock.clear();
-      
-      // 清理條目緩存
-      const entries = window.MediaCoverPlugin?.registeredEntries || [];
-      entries.forEach(({ entry }) => {
-        entryFinalUrlCache.delete(entry);
-        entryDecisionCache.delete(entry);
-      });
     }, 500);
   }
 
@@ -293,13 +320,23 @@
   function initializeSystem() {
     setupNavigationListener();
     
-    // 註冊所有現有的媒體條目
+    // 監聽Options對話框的出現
+    const observer = new MutationObserver((mutations) => {
+      if (document.querySelector('.dialog-title')?.textContent?.includes('Options')) {
+        setTimeout(insertCoverLoadToggle, 100);
+      }
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+    
     setTimeout(() => {
       const mediaElements = document.querySelectorAll('.icon, .entry-icon, .media-icon, [class*="icon"]');
       mediaElements.forEach(element => {
         const parent = element.closest('[data-uri], [data-name]');
         if (parent && (parent.dataset.uri || parent.dataset.name)) {
-          // 這裡不需要做任何懶加載處理，只註冊條目
           if (!window.MediaCoverPlugin) {
             window.MediaCoverPlugin = {};
           }
@@ -322,6 +359,11 @@
 
   // ========== React 圖片組件 ==========
   function ImgFallback({ fallback, tag = 'img', props, entry }) {
+    // 如果封面加載被禁用，直接返回fallback
+    if (!coverLoadEnabled) {
+      return fallback && h(fallback);
+    }
+    
     const [err, setErr] = HFS.React.useState(false);
     const [localSrc, setLocalSrc] = HFS.React.useState('');
     const [loaded, setLoaded] = HFS.React.useState(false);
@@ -439,7 +481,6 @@
 
         if (imageType === 'cover' || imageType === 'cover-gif') {
           markCurrentUrlFailed(entry, localSrc);
-          // 在嫁接模式下，如果URL失敗，就直接顯示fallback，不重試
           if (!pluginConfig.enableGraftMode) {
             setRetryKey(prev => prev + 1);
           } else {
@@ -465,7 +506,7 @@
       className: `${props.className || ''} thumbnail passthrough ${loaded ? 'loaded' : 'loading'} ${imageType}`,
       onLoad: handleLoad,
       onError: handleError,
-      loading: 'eager', // 改為立即加載
+      loading: 'eager',
       decoding: 'async'
     });
   }
@@ -528,36 +569,20 @@
     
     const fallbackSpan = () => h('span', props);
 
+    // 如果封面加載被禁用，直接返回圖標
+    if (!coverLoadEnabled) {
+      return h('span', props);
+    }
+
     return h(ImgFallback, {
       fallback: fallbackSpan,
       props: {
         ...props,
         className: `${props.className} thumbnail passthrough`,
-        loading: 'eager', // 改為立即加載
+        loading: 'eager',
         decoding: 'async',
       },
       entry: entry,
     });
-  });
-
-  // ========== 清理函數 ==========
-  window.addEventListener('beforeunload', () => {
-    try {
-      if (navigationTimeout) {
-        clearTimeout(navigationTimeout);
-      }
-      
-      // 清理所有緩存
-      errorCache.clear();
-      loadedImagesCache.clear();
-      processingUrls.clear();
-      clickLock.clear();
-      entryFinalUrlCache = new WeakMap();
-      entryDecisionCache = new WeakMap();
-      
-      if (window.MediaCoverPlugin) {
-        window.MediaCoverPlugin.registeredEntries = [];
-      }
-    } catch (error) {}
   });
 }

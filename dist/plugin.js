@@ -1,5 +1,5 @@
 exports.repo = "Hug3O/MVfiles-covers"
-exports.version = 5.3
+exports.version = 5.5
 exports.description = "Media file cover/thumbnail display with WebM video format support using single-path graft mode"
 exports.apiRequired = 8.65
 exports.frontend_js = 'main.js'
@@ -56,7 +56,7 @@ exports.init = api => {
   return {
     onDirEntry({ entry, node }) {
       const ext = entry.ext?.toLowerCase()
-      const audioExts = ['mp3','flac','wav','ape','aac','ogg','m4a','alac','dsf','dsd','aif','aiff']
+      const audioExts = ['mp3','flac','wav','ape','aac','ogg','m4a','alac','dsf','dsd','aif','aiff','opus']
       const videoExts = ['mp4','webm','mkv','avi','mov','mpeg','mpg','wmv','rmvb','rm','dat','ts','vob','flv']
       const fileName = basename(entry.n, '.' + ext)
 
