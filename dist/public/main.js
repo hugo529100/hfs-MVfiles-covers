@@ -217,23 +217,8 @@
     }
   }
 
-  // ========== 事件處理 ==========
-  function handleMediaClick(entry, e) {
-    e.preventDefault();
-    e.stopPropagation();
-    const ext = entry.ext?.toLowerCase();
-    
-    if (isNativeGifFile(entry)) {
-      HFS.fileShow(entry);
-      return;
-    }
-    
-    if (audioExts.includes(ext) && typeof MMP?.audio === 'function') {
-      MMP.audio(entry);
-    } else {
-      HFS.fileShow(entry, { startPlaying: true });
-    }
-  }
+  // ========== 移除點擊事件處理 ==========
+  // 原 handleMediaClick 函數已移除
 
   // ========== 在Options界面中添加開關 ==========
   function insertCoverLoadToggle() {
@@ -547,11 +532,7 @@
       const props = {
         className: `icon font-icon fa-file-image media-icon gif ${iconProps?.className || ''}`,
         title: iconProps?.title || 'GIF image',
-        onClick: (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          HFS.fileShow(entry);
-        },
+        // 移除了 onClick 事件
         role: 'img',
       };
       return h('span', props);
@@ -562,8 +543,8 @@
     const type = audioExts.includes(ext) ? 'audio' : 'video';
     const props = {
       className: `icon font-icon fa-${type} media-icon ${type} ${iconProps?.className || ''}`,
-      title: iconProps?.title || `Click to ${type === 'audio' ? 'play' : 'preview'}`,
-      onClick: (e) => handleMediaClick(entry, e),
+      title: iconProps?.title || `${type === 'audio' ? 'Audio' : 'Video'} file`,
+      // 移除了 onClick 事件
       role: 'img',
     };
     
