@@ -15,13 +15,13 @@
 }
 
 /* 媒体图标基础样式 */
-.media-icon.audio,
-.media-icon.video {
-/* position: relative;
+.list-wrapper.list-mode[style*="--tile-size: 0"] .media-icon.audio,
+.list-wrapper.list-mode[style*="--tile-size: 0"] .media-icon.video {
+  position: relative;
   display: inline-block;
-  width: 1em;
-  height: 1em;
-  vertical-align: middle; */
+  width: 1.2em;
+  height: 1.2em;
+  vertical-align: middle;
 }
 
 /* 确保默认图标样式 */
@@ -29,5 +29,4 @@
 .icon.font-icon {
 font-family: 'Font Awesome 5 Free', 'Font Awesome 5 Pro', sans-serif;
   font-weight: 900;
-}
-*/ 
+}*/ 
