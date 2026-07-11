@@ -1,11 +1,10 @@
 exports.repo = "Hug3O/MVfiles-covers"
-exports.version = 5.7
+exports.version = 5.9
 exports.description = "Media file cover/thumbnail display with GIF format support using single-path graft mode"
 exports.apiRequired = 8.65
 exports.frontend_js = 'main.js'
 exports.frontend_css = 'style.css'
 exports.afterPlugin = 'Musicplayer+'
-exports.depend = [{ "repo": "rejetto/thumbnails", "version": 4.83 }]
 exports.config = {
   videoThumbFormat: {
     type: 'select',
@@ -57,7 +56,7 @@ exports.init = api => {
     onDirEntry({ entry, node }) {
       const ext = entry.ext?.toLowerCase()
       const audioExts = ['mp3','flac','wav','ape','aac','ogg','m4a','alac','dsf','dsd','aif','aiff','opus']
-      const videoExts = ['mp4','webm','mkv','avi','mov','mpeg','mpg','wmv','rmvb','rm','dat','ts','vob','flv']
+      const videoExts = ['mp4','webm','mkv','avi','mov','mpeg','mpg','wmv','rmvb','rm','dat','ts','vob','flv','divx']
       const fileName = basename(entry.n, '.' + ext)
 
       const enableGraftMode = api.getConfig('enableGraftMode') || false

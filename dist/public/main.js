@@ -3,7 +3,7 @@
   const { h } = HFS;
   const pluginConfig = HFS.getPluginConfig?.() || {};
   const audioExts = ['mp3', 'flac', 'wav', 'ape', 'aac', 'ogg', 'm4a', 'alac', 'dsf', 'dsd', 'aif', 'aiff', 'opus'];
-  const videoExts = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'mpeg', 'mpg', 'wmv', 'rmvb', 'rm', 'dat', 'ts', 'vob', 'flv'];
+  const videoExts = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'mpeg', 'mpg', 'wmv', 'rmvb', 'rm', 'dat', 'ts', 'vob', 'flv', 'divx'];
   
   // ========== 封面加載開關設置 ==========
   const STORAGE_KEY_COVER_LOAD = 'hfs_media_cover_load_enabled';
