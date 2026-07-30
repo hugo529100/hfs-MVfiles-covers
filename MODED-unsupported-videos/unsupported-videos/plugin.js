@@ -1,8 +1,8 @@
-exports.version = 3.3;
+exports.version = 3.4;
 exports.apiRequired = 12.91;
 exports.description = "Optimized media player with intelligent gradient transcoding and high-quality DSD/DSF support";
 exports.repo = "Hug3O/Unsupported-videos";
-exports.preview = ["https://github.com/user-attachments/assets/7daaf2c8-9dbd-46f1-93b6-7628c4d1d3b6"]
+exports.preview = ["https://github.com/user-attachments/assets/7daaf2c8-9dbd-46f1-93b6-7628c4d1d3b6"];
 exports.frontend_js = 'main.js';
 
 const CACHE_DIR = 'cache';
@@ -14,11 +14,11 @@ const WAV_MIN_SIZE = 1024 * 1024;
 const FLAC_HEADER = Buffer.from('664c6143', 'hex');
 const SUPPORTED_AUDIO_EXTS = ['mp3','flac','m4a','ogg','opus','wma','aiff','aif','alac','dsd','dsf','dff','ape','wav'];
 const SUPPORTED_VIDEO_EXTS = ['webm','avi','mkv','mp4','mov','mpg','wmv','ts','rmvb','rm','dat','vob','flv'];
-const PROCESS_CLEANUP_TIMEOUT = 5000; // Timeout for process cleanup (5 seconds)
+const PROCESS_CLEANUP_TIMEOUT = 5000;
+const THUMBNAIL_DEBOUNCE_DELAY = 2000; // 防抖延迟2秒
 
-// 重新整理的配置面板 - 重要設置項目靠前
+// 配置面板
 exports.config = {
-  // ================ 1. 基本設置 ================
   extensions: {
     frontend: true,
     defaultValue: 'webm,avi,mkv,mp4,mov,mpg,rmvb,rm,dat,ts,vob,aiff,aif,alac,dsd,dsf,dff,ape,mp3,flac,m4a,ogg,wma,wmv',
@@ -37,8 +37,6 @@ exports.config = {
     helperText: "Additional parameters to pass to FFmpeg (supports quotes)",
     xs: 6
   },
-  
-  // ================ 2. 性能與進程管理 ================
   max_processes: { 
     type: 'number', 
     min: 1, 
@@ -73,8 +71,6 @@ exports.config = {
     helperText: "Leave empty to allow every account",
     xs: 12
   },
-  
-  // ================ 3. 音頻相關設置 ================
   audio_format: {
     type: 'select',
     label: 'Audio output format',
@@ -106,21 +102,20 @@ exports.config = {
     showIf: x => x.extensions.includes('dsd') || x.extensions.includes('dsf'),
     xs: 6
   },
-    extract_covers: {
+  extract_covers: {
     type: 'boolean',
     defaultValue: false,
     label: 'Extract album covers',
     helperText: 'Extract embedded album covers from audio files',
     xs: 6
   },
-  // ================ 4. 視頻轉碼設置 ================
   force_transcode_formats: {
     type: 'string',
-    defaultValue: 'wmv,mpg,avi,ts,rmvb,vob,flv',
+    defaultValue: 'wmv,mpg,avi,ts,rmvb,vob,flv,mkv',
     helperText: 'File formats that should always be transcoded (comma separated)',
     xs: 12
   },  
-transcode_quality: {
+  transcode_quality: {
     type: 'select',
     label: 'Transcoding Quality',
     defaultValue: 'balanced',
@@ -139,10 +134,6 @@ transcode_quality: {
     label: 'Enable hardware acceleration',
     helperText: 'Use hardware acceleration for video transcoding if available'
   },
-
-  
-  // ================ 5. 封面和縮略圖設置 ================
-
   extract_video_thumbnails: {
     type: 'boolean',
     defaultValue: false,
@@ -162,8 +153,6 @@ transcode_quality: {
     showIf: x => x.extract_video_thumbnails,
     xs: 6
   },
-  
-  // ================ 6. 智能梯度設置 ================
   video_size_threshold: {
     type: 'number',
     defaultValue: 250,
@@ -174,8 +163,6 @@ transcode_quality: {
     showIf: x => x.extract_video_thumbnails && x.thumbnail_format === 'gif',
     xs: 6
   },
-  
-  // ================ 7. GIF通用寬度設置 ================
   gif_width: {
     type: 'number',
     min: 100,
@@ -186,8 +173,6 @@ transcode_quality: {
     showIf: x => x.extract_video_thumbnails && x.thumbnail_format === 'gif',
     xs: 6
   },
-  
-  // ================ 8. 短視頻GIF設置 (<= threshold) ================
   short_video_start_time: {
     type: 'string',
     defaultValue: '00:03:00',
@@ -216,8 +201,6 @@ transcode_quality: {
     showIf: x => x.extract_video_thumbnails && x.thumbnail_format === 'gif',
     xs: 6
   },
-  
-  // ================ 9. 長視頻GIF設置 (> threshold) ================
   long_video_start_time: {
     type: 'string',
     defaultValue: '00:10:00',
@@ -246,8 +229,6 @@ transcode_quality: {
     showIf: x => x.extract_video_thumbnails && x.thumbnail_format === 'gif',
     xs: 6
   },
-  
-  // ================ 10. 候補視頻GIF設置 (Fallback) ================
   backup_video_start_time: {
     type: 'string',
     defaultValue: '00:00:00',
@@ -276,8 +257,6 @@ transcode_quality: {
     showIf: x => x.extract_video_thumbnails && x.thumbnail_format === 'gif',
     xs: 6
   },
-  
-  // ================ 11. JPG縮略圖設置 ================
   thumbnail_time: {
     type: 'string',
     defaultValue: '00:00:05',
@@ -286,8 +265,6 @@ transcode_quality: {
     showIf: x => x.extract_video_thumbnails && x.thumbnail_format === 'jpg',
     xs: 6
   },
-  
-  // ================ 12. 調試設置 ================
   debug_ffmpeg: {
     type: 'boolean',
     xs: 6,
@@ -300,6 +277,8 @@ transcode_quality: {
 exports.configDialog = { maxWidth: '55em' };
 
 exports.changelog = [
+  { "version": 2.1, "message": "Added debounce and deduplication for thumbnail extraction to prevent FFmpeg process flood" },
+  { "version": 2.0, "message": "Added single-process thumbnail queue to prevent CPU overload" },
   { "version": 1.9, "message": "Added video time settings and reorganized configuration panel" },
   { "version": 1.8, "message": "Support quoting in the parameters configuration" },
   { "version": 1.7, "message": "Optimized DSD/DSF support with ultra quality mode" },
@@ -313,14 +292,294 @@ exports.changelog = [
 ];
 
 exports.init = api => {
-  const running = new Map(); // Maps process to { username, pid, startTime }
-  const thumbnailProcesses = new Map(); // Maps process to { filePath, pid, startTime, gradientStep }
+  const running = new Map();
+  const thumbnailProcesses = new Map();
+  const pendingThumbnails = new Map(); // 防抖和去重
   const { spawn } = api.require('child_process');
   const fs = api.require('fs');
   const fsp = fs.promises;
   const pathLib = api.require('path');
   const os = api.require('os');
 
+  // ================ 缩略图队列管理器 ================
+  class ThumbnailQueue {
+    constructor() {
+      this.queue = [];
+      this.currentProcesses = new Map();
+      this.processedCount = 0;
+      this.failedCount = 0;
+      this.isProcessing = false;
+      this.maxConcurrent = 1;
+    }
+
+    add(task) {
+      return new Promise((resolve, reject) => {
+        this.queue.push({ task, resolve, reject, addedAt: Date.now() });
+        debugLog(`[队列] 任务入队 (队列长度: ${this.queue.length})`);
+        this.processQueue();
+      });
+    }
+
+    async processQueue() {
+      if (this.isProcessing) {
+        debugLog(`[队列] 正在处理中，跳过`);
+        return;
+      }
+      
+      if (this.queue.length === 0) {
+        return;
+      }
+      
+      if (this.currentProcesses.size >= this.maxConcurrent) {
+        debugLog(`[队列] 已达并发上限 (${this.currentProcesses.size}/${this.maxConcurrent})`);
+        return;
+      }
+
+      this.isProcessing = true;
+      debugLog(`[队列] 开始处理 (队列: ${this.queue.length}, 进程: ${this.currentProcesses.size})`);
+
+      try {
+        while (this.queue.length > 0 && this.currentProcesses.size < this.maxConcurrent) {
+          const item = this.queue.shift();
+          const { task, resolve, reject } = item;
+          
+          debugLog(`[队列] 执行任务 (剩余: ${this.queue.length})`);
+          
+          this.executeTask(task)
+            .then(result => {
+              this.processedCount++;
+              debugLog(`[队列] 任务成功 (总成功: ${this.processedCount})`);
+              resolve(result);
+            })
+            .catch(error => {
+              this.failedCount++;
+              debugLog(`[队列] 任务失败 (总失败: ${this.failedCount}) - ${error.message}`);
+              reject(error);
+            })
+            .finally(() => {
+              this.isProcessing = false;
+              setImmediate(() => this.processQueue());
+            });
+        }
+      } finally {
+        if (this.queue.length > 0 && this.currentProcesses.size < this.maxConcurrent) {
+          this.isProcessing = false;
+          setImmediate(() => this.processQueue());
+        } else {
+          this.isProcessing = false;
+        }
+      }
+    }
+
+    async executeTask(task) {
+      const { filePath, thumbnailPath, params, type } = task;
+      
+      const processKey = `${pathLib.basename(filePath)}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+      this.currentProcesses.set(processKey, { 
+        startTime: Date.now(),
+        filePath,
+        type
+      });
+
+      try {
+        debugLog(`[队列] [${type}] 开始: ${pathLib.basename(filePath)}`);
+        
+        let result;
+        switch(type) {
+          case 'gif':
+            result = await this.generateGif(filePath, thumbnailPath, params);
+            break;
+          case 'jpg':
+            result = await this.generateJpg(filePath, thumbnailPath, params);
+            break;
+          case 'cover':
+            result = await this.extractCover(filePath, thumbnailPath, params);
+            break;
+          default:
+            throw new Error(`未知任务类型: ${type}`);
+        }
+        
+        debugLog(`[队列] [${type}] 完成: ${pathLib.basename(filePath)}`);
+        return result;
+      } finally {
+        this.currentProcesses.delete(processKey);
+        debugLog(`[队列] 进程释放 (剩余进程: ${this.currentProcesses.size})`);
+      }
+    }
+
+    async generateGif(filePath, thumbnailPath, params) {
+      const startTime = params.startTime;
+      const duration = params.duration;
+      const fps = params.fps;
+      const width = params.width;
+      
+      debugLog(`[队列] GIF参数: 起始=${startTime}s, 时长=${duration}s, FPS=${fps}, 宽度=${width}`);
+      
+      const palettePath = thumbnailPath.replace('.gif', '_palette.png');
+      
+      // 生成调色板
+      const paletteArgs = [
+        '-ss', formatTimeFromSeconds(startTime),
+        '-t', '5',
+        '-i', filePath,
+        '-vf', `fps=${fps},scale=${width}:-1:flags=lanczos,palettegen`,
+        '-y', palettePath
+      ];
+      
+      const paletteProc = spawn(api.getConfig('ffmpeg_path') || 'ffmpeg', paletteArgs);
+      
+      await new Promise((resolve, reject) => {
+        let stderr = '';
+        paletteProc.stderr.on('data', data => { stderr += data.toString(); });
+        
+        paletteProc.on('exit', code => {
+          cleanupProcess(paletteProc);
+          if (code !== 0) {
+            debugLog(`[队列] 调色板生成失败 (代码: ${code}): ${stderr}`);
+            fsp.unlink(palettePath).catch(() => {});
+            reject(new Error(`Palette generation failed with code ${code}`));
+          } else {
+            resolve();
+          }
+        });
+        paletteProc.on('error', reject);
+      });
+      
+      // 生成GIF
+      const gifArgs = [
+        '-ss', formatTimeFromSeconds(startTime),
+        '-t', duration.toString(),
+        '-i', filePath,
+        '-i', palettePath,
+        '-filter_complex', `fps=${fps},scale=${width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3`,
+        '-loop', '0',
+        '-f', 'gif',
+        '-y', thumbnailPath
+      ];
+      
+      const gifProc = spawn(api.getConfig('ffmpeg_path') || 'ffmpeg', gifArgs);
+      
+      return new Promise((resolve, reject) => {
+        let stderr = '';
+        gifProc.stderr.on('data', data => { stderr += data.toString(); });
+        
+        gifProc.on('exit', async code => {
+          cleanupProcess(gifProc);
+          try { await fsp.unlink(palettePath).catch(() => {}); } catch {}
+          
+          if (code === 0) {
+            try {
+              const stats = await fsp.stat(thumbnailPath);
+              if (stats.size > 0) {
+                debugLog(`[队列] GIF生成成功 (大小: ${(stats.size/1024).toFixed(1)}KB)`);
+                resolve(true);
+              } else {
+                debugLog(`[队列] GIF为0字节`);
+                await fsp.unlink(thumbnailPath).catch(() => {});
+                reject(new Error('Generated GIF is 0 bytes'));
+              }
+            } catch (err) {
+              reject(err);
+            }
+          } else {
+            debugLog(`[队列] GIF生成失败 (代码: ${code}): ${stderr}`);
+            await fsp.unlink(thumbnailPath).catch(() => {});
+            reject(new Error(`GIF generation failed with code ${code}`));
+          }
+        });
+        gifProc.on('error', async (err) => {
+          cleanupProcess(gifProc);
+          await fsp.unlink(palettePath).catch(() => {});
+          await fsp.unlink(thumbnailPath).catch(() => {});
+          reject(err);
+        });
+      });
+    }
+
+    async generateJpg(filePath, thumbnailPath, params) {
+      const time = params.time || '00:00:05';
+      debugLog(`[队列] JPG参数: 时间=${time}`);
+
+      const ffmpeg = spawn(api.getConfig('ffmpeg_path') || 'ffmpeg', [
+        '-ss', time,
+        '-i', filePath,
+        '-vframes', '1',
+        '-q:v', '2',
+        '-f', 'image2',
+        thumbnailPath
+      ]);
+
+      return new Promise((resolve, reject) => {
+        let stderr = '';
+        ffmpeg.stderr.on('data', data => { stderr += data.toString(); });
+        
+        ffmpeg.on('exit', code => {
+          cleanupProcess(ffmpeg);
+          if (code === 0) {
+            debugLog(`[队列] JPG生成成功`);
+            resolve(true);
+          } else {
+            debugLog(`[队列] JPG生成失败 (代码: ${code}): ${stderr}`);
+            fsp.unlink(thumbnailPath).catch(() => {});
+            reject(new Error(`JPG generation failed with code ${code}`));
+          }
+        });
+        ffmpeg.on('error', reject);
+      });
+    }
+
+    async extractCover(filePath, thumbnailPath, params) {
+      debugLog(`[队列] 提取封面`);
+
+      const ffmpeg = spawn(api.getConfig('ffmpeg_path') || 'ffmpeg', [
+        '-i', filePath,
+        '-an',
+        '-vcodec', 'copy',
+        thumbnailPath
+      ]);
+
+      return new Promise((resolve, reject) => {
+        let stderr = '';
+        ffmpeg.stderr.on('data', data => { stderr += data.toString(); });
+        
+        ffmpeg.on('exit', code => {
+          cleanupProcess(ffmpeg);
+          if (code === 0) {
+            debugLog(`[队列] 封面提取成功`);
+            resolve(true);
+          } else {
+            debugLog(`[队列] 封面提取失败 (代码: ${code}): ${stderr}`);
+            fsp.unlink(thumbnailPath).catch(() => {});
+            reject(new Error(`Cover extraction failed with code ${code}`));
+          }
+        });
+        ffmpeg.on('error', reject);
+      });
+    }
+
+    getStatus() {
+      return {
+        queueLength: this.queue.length,
+        processing: this.isProcessing,
+        currentProcesses: this.currentProcesses.size,
+        maxConcurrent: this.maxConcurrent,
+        processedCount: this.processedCount,
+        failedCount: this.failedCount,
+        currentTasks: Array.from(this.currentProcesses.keys())
+      };
+    }
+
+    clear() {
+      this.queue = [];
+      this.currentProcesses.clear();
+      debugLog('[队列] 已清空所有任务');
+    }
+  }
+
+  // 初始化队列
+  const thumbnailQueue = new ThumbnailQueue();
+
+  // ================ 辅助函数 ================
   function parseTimeToSeconds(timeStr) {
     if (!timeStr.includes(':')) {
       return parseFloat(timeStr) || 0;
@@ -346,7 +605,6 @@ exports.init = api => {
   function getGradientParams() {
     const gifWidth = api.getConfig('gif_width') || 320;
     
-    // 轉碼參數根據轉碼質量決定
     const transcodeQuality = api.getConfig('transcode_quality') || 'balanced';
     let transcodeParams;
     
@@ -357,7 +615,7 @@ exports.init = api => {
       case 'high':
         transcodeParams = { crf: 18, preset: 'medium', tune: 'film' };
         break;
-      default: // balanced
+      default:
         transcodeParams = { crf: 23, preset: 'fast', tune: 'film' };
     }
     
@@ -381,7 +639,7 @@ exports.init = api => {
         duration: api.getConfig('backup_video_duration') || 10,
         fps: api.getConfig('backup_video_fps') || 5,
         width: gifWidth,
-        transcode: { crf: 26, preset: 'ultrafast', tune: 'fastdecode' } // 候補使用更快參數
+        transcode: { crf: 26, preset: 'ultrafast', tune: 'fastdecode' }
       }
     };
   }
@@ -413,15 +671,15 @@ exports.init = api => {
         if (file.startsWith(TEMP_PREFIX)) {
           try {
             await fsp.unlink(pathLib.join(dir, file));
-            debugLog(`Cleaned temp file: ${file}`);
+            debugLog(`清理临时文件: ${file}`);
           } catch (e) {
-            debugLog(`Failed to clean temp file ${file}: ${e}`);
+            debugLog(`清理临时文件失败 ${file}: ${e}`);
           }
         }
       }));
     } catch (e) {
       if (e.code !== 'ENOENT') {
-        debugLog(`Temp file cleanup failed: ${e}`);
+        debugLog(`临时文件清理失败: ${e}`);
       }
     }
   }
@@ -436,16 +694,12 @@ exports.init = api => {
             const stats = await fsp.stat(filePath);
             if (stats.size === 0) {
               await fsp.unlink(filePath);
-              debugLog(`Cleaned 0-byte GIF: ${file}`);
+              debugLog(`清理0字节GIF: ${file}`);
             }
-          } catch (e) {
-            // 忽略錯誤
-          }
+          } catch (e) {}
         }
       }));
-    } catch (e) {
-      // 目錄不存在，忽略
-    }
+    } catch (e) {}
   }
 
   function debugLog(message) {
@@ -456,51 +710,181 @@ exports.init = api => {
 
   function cleanupProcess(proc, force = false) {
     try {
-      // Skip if already killed
       if (proc.killed) return;
       
-      // First try to gracefully kill the process
       proc.kill('SIGTERM');
       
-      // Set up a timeout for force kill if process doesn't exit
       const timeout = setTimeout(() => {
         if (proc && !proc.killed) {
           try {
             proc.kill('SIGKILL');
-            debugLog(`Force killed PID ${proc.pid}`);
+            debugLog(`强制终止 PID ${proc.pid}`);
           } catch (e) {
-            debugLog(`SIGKILL failed for PID ${proc.pid}: ${e}`);
+            debugLog(`SIGKILL 失败 PID ${proc.pid}: ${e}`);
           }
         }
       }, force ? 0 : PROCESS_CLEANUP_TIMEOUT);
       
-      // Clean up streams
       if (proc.stdout) proc.stdout.destroy();
       if (proc.stderr) proc.stderr.destroy();
       if (proc.stdin) proc.stdin.destroy();
       
-      // Clear the timeout if process exits
       proc.once('exit', () => clearTimeout(timeout));
     } catch (e) {
-      debugLog(`Cleanup process error: ${e}`);
+      debugLog(`清理进程错误: ${e}`);
     }
   }
 
   async function getVideoParams(filePath, fileSizeMB) {
-    // 獲取梯度參數
     const gradientParams = getGradientParams();
     const threshold = api.getConfig('video_size_threshold') || 250;
     const isLongVideo = fileSizeMB > threshold;
     
     const params = isLongVideo ? gradientParams.LONG : gradientParams.SHORT;
     
-    debugLog(`視頻文件: ${pathLib.basename(filePath)} (大小: ${fileSizeMB.toFixed(2)}MB, 閾值: ${threshold}MB, 類型: ${isLongVideo ? '長視頻' : '短視頻'})`);
+    debugLog(`视频: ${pathLib.basename(filePath)} (${fileSizeMB.toFixed(2)}MB, ${isLongVideo ? '长视频' : '短视频'})`);
     
     return {
       thumbnail: params,
       transcode: params.transcode,
       isLongVideo: isLongVideo
     };
+  }
+
+  // ================ 缩略图提取函数（使用队列 + 防抖） ================
+  function extractVideoThumbnailAsync(filePath) {
+    if (!api.getConfig('extract_video_thumbnails')) return Promise.resolve();
+
+    const key = filePath;
+    
+    // 去重：如果正在处理相同文件，返回现有Promise
+    if (pendingThumbnails.has(key)) {
+      debugLog(`[防抖] 复用任务: ${pathLib.basename(filePath)}`);
+      return pendingThumbnails.get(key);
+    }
+
+    // 创建防抖Promise
+    const promise = new Promise((resolve) => {
+      // 清除旧的定时器
+      if (pendingThumbnails.has(`${key}_timer`)) {
+        clearTimeout(pendingThumbnails.get(`${key}_timer`));
+        pendingThumbnails.delete(`${key}_timer`);
+      }
+
+      // 设置防抖延迟
+      const timer = setTimeout(async () => {
+        pendingThumbnails.delete(`${key}_timer`);
+        pendingThumbnails.delete(key);
+        
+        try {
+          debugLog(`[防抖] 执行缩略图提取: ${pathLib.basename(filePath)}`);
+          await extractVideoThumbnail(filePath);
+        } catch (e) {
+          debugLog(`[防抖] 缩略图提取失败: ${e}`);
+        } finally {
+          resolve();
+        }
+      }, THUMBNAIL_DEBOUNCE_DELAY);
+
+      pendingThumbnails.set(`${key}_timer`, timer);
+    });
+
+    pendingThumbnails.set(key, promise);
+    return promise;
+  }
+
+  async function extractVideoThumbnail(filePath) {
+    const ext = pathLib.extname(filePath).toLowerCase().slice(1);
+    if (!SUPPORTED_VIDEO_EXTS.includes(ext)) return;
+
+    try {
+      const dir = pathLib.dirname(filePath);
+      const thumbnailsDir = pathLib.join(dir, CACHE_DIR, VIDEO_THUMBNAIL_DIR);
+      await fsp.mkdir(thumbnailsDir, { recursive: true });
+      
+      await cleanupZeroByteGifs(thumbnailsDir);
+      
+      const filename = pathLib.basename(filePath, pathLib.extname(filePath));
+      const format = api.getConfig('thumbnail_format') || 'jpg';
+      const thumbnailPath = pathLib.join(thumbnailsDir, `${filename}.${format}`);
+      
+      try {
+        await fsp.access(thumbnailPath);
+        debugLog(`[队列] 缩略图已存在: ${thumbnailPath}`);
+        return;
+      } catch {}
+
+      try {
+        const stats = await fsp.stat(filePath);
+        if (stats.size === 0) {
+          debugLog(`[队列] 跳过0字节文件: ${filePath}`);
+          return;
+        }
+      } catch (e) {
+        debugLog(`[队列] 无法读取文件: ${filePath} - ${e}`);
+        return;
+      }
+
+      const stats = await fsp.stat(filePath);
+      const fileSizeMB = stats.size / (1024 * 1024);
+      const gradientParams = getGradientParams();
+      const threshold = api.getConfig('video_size_threshold') || 250;
+      const isLongVideo = fileSizeMB > threshold;
+
+      if (format === 'jpg') {
+        let time = api.getConfig('thumbnail_time') || '00:00:05';
+        if (!time.includes(':')) {
+          const seconds = parseInt(time) || 5;
+          time = formatTimeFromSeconds(seconds);
+        }
+
+        await thumbnailQueue.add({
+          type: 'jpg',
+          filePath,
+          thumbnailPath,
+          params: { time }
+        });
+      } else {
+        let success = false;
+        let attempts = [];
+        
+        if (isLongVideo) {
+          attempts = [
+            { params: gradientParams.LONG, label: '长视频' },
+            { params: gradientParams.SHORT, label: '短视频' },
+            { params: gradientParams.BACKUP, label: '备用' }
+          ];
+        } else {
+          attempts = [
+            { params: gradientParams.SHORT, label: '短视频' },
+            { params: gradientParams.BACKUP, label: '备用' }
+          ];
+        }
+
+        for (const attempt of attempts) {
+          try {
+            debugLog(`[队列] 尝试${attempt.label}...`);
+            await thumbnailQueue.add({
+              type: 'gif',
+              filePath,
+              thumbnailPath,
+              params: attempt.params
+            });
+            success = true;
+            break;
+          } catch (error) {
+            debugLog(`[队列] ${attempt.label}失败: ${error.message}`);
+          }
+        }
+
+        if (!success) {
+          debugLog(`[队列] 所有尝试均失败: ${filePath}`);
+          await fsp.unlink(thumbnailPath).catch(() => {});
+        }
+      }
+    } catch (e) {
+      debugLog(`[队列] 缩略图提取失败: ${filePath} - ${e}`);
+    }
   }
 
   async function extractAlbumCover(filePath) {
@@ -519,262 +903,46 @@ exports.init = api => {
       
       try {
         await fsp.access(coverPath);
+        debugLog(`[队列] 封面已存在: ${coverPath}`);
         return;
       } catch {}
 
-      const ffmpeg = spawn(api.getConfig('ffmpeg_path') || 'ffmpeg', [
-        '-i', filePath,
-        '-an',
-        '-vcodec', 'copy',
-        coverPath
-      ]);
-
-      return new Promise(resolve => {
-        ffmpeg.on('exit', code => {
-          cleanupProcess(ffmpeg);
-          if (code !== 0) {
-            fsp.unlink(coverPath).catch(() => {});
-            debugLog(`Album cover extraction failed with code ${code} for ${filePath}`);
-          }
-          resolve();
-        });
-        ffmpeg.on('error', (err) => {
-          cleanupProcess(ffmpeg);
-          debugLog(`Album cover extraction error for ${filePath}: ${err}`);
-          resolve();
-        });
+      await thumbnailQueue.add({
+        type: 'cover',
+        filePath,
+        thumbnailPath: coverPath,
+        params: {}
       });
     } catch (e) {
-      debugLog(`Album cover extraction failed ${filePath}: ${e}`);
+      debugLog(`[队列] 封面提取失败: ${filePath} - ${e}`);
     }
   }
 
-  async function generateGifWithParams(filePath, thumbnailPath, params) {
-    const startTime = params.startTime;
-    const duration = params.duration;
-    const fps = params.fps;
-    const width = params.width;
-    
-    debugLog(`GIF生成參數: ${pathLib.basename(filePath)} (起始: ${startTime}秒, 時長: ${duration}秒, ${fps}幀, 寬度: ${width}像素)`);
-    
-    const palettePath = thumbnailPath.replace('.gif', '_palette.png');
-    
-    // 第一梯度：生成調色板
-    const paletteArgs = [
-      '-ss', formatTimeFromSeconds(startTime),
-      '-t', '5',
-      '-i', filePath,
-      '-vf', `fps=${fps},scale=${width}:-1:flags=lanczos,palettegen`,
-      '-y', palettePath
-    ];
-    
-    const paletteProc = spawn(api.getConfig('ffmpeg_path') || 'ffmpeg', paletteArgs);
-    
-    await new Promise(resolve => {
-      paletteProc.on('exit', code => {
-        cleanupProcess(paletteProc);
-        if (code !== 0) {
-          debugLog(`調色板生成失敗: ${filePath} (代碼: ${code})`);
-          fsp.unlink(palettePath).catch(() => {});
-        }
-        resolve();
-      });
-      paletteProc.on('error', (err) => {
-        cleanupProcess(paletteProc);
-        debugLog(`調色板生成錯誤: ${filePath} - ${err}`);
-        resolve();
-      });
-    });
-    
-    // 第二梯度：生成GIF
-    const gifArgs = [
-      '-ss', formatTimeFromSeconds(startTime),
-      '-t', duration.toString(),
-      '-i', filePath,
-      '-i', palettePath,
-      '-filter_complex', `fps=${fps},scale=${width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3`,
-      '-loop', '0',
-      '-f', 'gif',
-      '-y', thumbnailPath
-    ];
-    
-    const gifProc = spawn(api.getConfig('ffmpeg_path') || 'ffmpeg', gifArgs);
-    
-    return new Promise(resolve => {
-      gifProc.on('exit', async code => {
-        cleanupProcess(gifProc);
-        try { await fsp.unlink(palettePath); } catch {}
-        
-        if (code === 0) {
-          // 檢查生成的GIF是否有效
-          try {
-            const stats = await fsp.stat(thumbnailPath);
-            if (stats.size > 0) {
-              resolve(true);
-            } else {
-              debugLog(`生成的GIF為0字節: ${filePath}`);
-              try { await fsp.unlink(thumbnailPath); } catch {}
-              resolve(false);
-            }
-          } catch {
-            debugLog(`無法讀取生成的GIF: ${filePath}`);
-            resolve(false);
-          }
-        } else {
-          debugLog(`GIF生成失敗: ${filePath} (代碼: ${code})`);
-          try { await fsp.unlink(thumbnailPath); } catch {}
-          resolve(false);
-        }
-      });
-      gifProc.on('error', async (err) => {
-        cleanupProcess(gifProc);
-        try { await fsp.unlink(palettePath); } catch {}
-        try { await fsp.unlink(thumbnailPath); } catch {}
-        debugLog(`GIF生成錯誤: ${filePath} - ${err}`);
-        resolve(false);
-      });
-    });
-  }
-
-  async function extractVideoThumbnail(filePath) {
-    const ext = pathLib.extname(filePath).toLowerCase().slice(1);
-    if (!SUPPORTED_VIDEO_EXTS.includes(ext)) return;
-
-    try {
-      const dir = pathLib.dirname(filePath);
-      const thumbnailsDir = pathLib.join(dir, CACHE_DIR, VIDEO_THUMBNAIL_DIR);
-      await fsp.mkdir(thumbnailsDir, { recursive: true });
-      
-      // 清理0字節GIF文件
-      await cleanupZeroByteGifs(thumbnailsDir);
-      
-      const filename = pathLib.basename(filePath, pathLib.extname(filePath));
-      const format = api.getConfig('thumbnail_format') || 'jpg';
-      const thumbnailPath = pathLib.join(thumbnailsDir, `${filename}.${format}`);
-      
-      try {
-        await fsp.access(thumbnailPath);
-        return;
-      } catch {}
-
-      // 檢查是否為0字節視頻文件
-      try {
-        const stats = await fsp.stat(filePath);
-        if (stats.size === 0) {
-          debugLog(`跳過0字節視頻文件: ${filePath}`);
-          return;
-        }
-      } catch (e) {
-        debugLog(`無法讀取文件信息: ${filePath} - ${e}`);
-        return;
-      }
-
-      if (format === 'jpg') {
-        let time = api.getConfig('thumbnail_time') || '00:00:05';
-        if (!time.includes(':')) {
-          const seconds = parseInt(time) || 5;
-          time = formatTimeFromSeconds(seconds);
-        }
-
-        const ffmpeg = spawn(api.getConfig('ffmpeg_path') || 'ffmpeg', [
-          '-ss', time,
-          '-i', filePath,
-          '-vframes', '1',
-          '-q:v', '2',
-          '-f', 'image2',
-          thumbnailPath
-        ]);
-
-        return new Promise(resolve => {
-          ffmpeg.on('exit', code => {
-            cleanupProcess(ffmpeg);
-            if (code !== 0) {
-              fsp.unlink(thumbnailPath).catch(() => {});
-              debugLog(`JPG縮略圖生成失敗: ${filePath} (代碼: ${code})`);
-            }
-            resolve();
-          });
-          ffmpeg.on('error', (err) => {
-            cleanupProcess(ffmpeg);
-            debugLog(`JPG縮略圖生成錯誤: ${filePath} - ${err}`);
-            resolve();
-          });
-        });
-      } else {
-        // GIF格式 - 使用智能梯度生成
-        try {
-          const stats = await fsp.stat(filePath);
-          const fileSizeMB = stats.size / (1024 * 1024);
-          
-          // 獲取所有參數設置
-          const gradientParams = getGradientParams();
-          
-          // 判斷視頻類型
-          const threshold = api.getConfig('video_size_threshold') || 250;
-          const isLongVideo = fileSizeMB > threshold;
-          
-          debugLog(`視頻文件: ${pathLib.basename(filePath)} (大小: ${fileSizeMB.toFixed(2)}MB, 閾值: ${threshold}MB, 類型: ${isLongVideo ? '長視頻' : '短視頻'})`);
-          
-          let success = false;
-          
-          if (isLongVideo) {
-            // 1. 首先嘗試長視頻GIF設置
-            debugLog(`嘗試長視頻GIF設置...`);
-            success = await generateGifWithParams(filePath, thumbnailPath, gradientParams.LONG);
-            
-            if (!success) {
-              // 2. 長視頻GIF設置失敗，嘗試短視頻GIF設置
-              debugLog(`長視頻GIF設置失敗，嘗試短視頻GIF設置...`);
-              success = await generateGifWithParams(filePath, thumbnailPath, gradientParams.SHORT);
-            }
-          } else {
-            // 1. 首先嘗試短視頻GIF設置
-            debugLog(`嘗試短視頻GIF設置...`);
-            success = await generateGifWithParams(filePath, thumbnailPath, gradientParams.SHORT);
-          }
-          
-          if (!success) {
-            // 3. 短視頻GIF設置失敗，嘗試候補視頻GIF設置
-            debugLog(`短視頻GIF設置失敗，嘗試候補視頻GIF設置...`);
-            success = await generateGifWithParams(filePath, thumbnailPath, gradientParams.BACKUP);
-          }
-          
-          if (success) {
-            debugLog(`GIF生成成功: ${thumbnailPath}`);
-          } else {
-            debugLog(`所有梯度嘗試均失敗: ${filePath}`);
-            try { await fsp.unlink(thumbnailPath); } catch {}
-          }
-        } catch (e) {
-          debugLog(`GIF生成過程錯誤: ${filePath} - ${e}`);
-        }
-      }
-    } catch (e) {
-      debugLog(`視頻縮略圖提取失敗: ${filePath} - ${e}`);
-    }
-  }
-
-  function extractVideoThumbnailAsync(filePath) {
-    if (!api.getConfig('extract_video_thumbnails')) return Promise.resolve();
-
-    return new Promise(resolve => {
-      setImmediate(async () => {
-        try {
-          await extractVideoThumbnail(filePath);
-        } catch (e) {
-          debugLog(`異步縮略圖提取失敗: ${e}`);
-        } finally {
-          resolve();
-        }
-      });
-    });
-  }
-
+  // ================ 主逻辑 ================
   return {
     unload() {
+      // 清理所有运行中的FFmpeg进程
       for (const proc of running.keys()) cleanupProcess(proc, true);
       for (const proc of thumbnailProcesses.keys()) cleanupProcess(proc, true);
+      
+      // 清理所有定时器
+      for (const [key, value] of pendingThumbnails) {
+        if (key.endsWith('_timer')) {
+          clearTimeout(value);
+        }
+      }
+      pendingThumbnails.clear();
+      
+      // 清理队列
+      thumbnailQueue.clear();
+      debugLog('[队列] 已清理所有资源');
     },
+    
+    // 添加队列状态查询接口
+    getQueueStatus() {
+      return thumbnailQueue.getStatus();
+    },
+
     middleware: async ctx => {
       return async () => {
         const src = ctx.state.fileSource;
@@ -782,9 +950,9 @@ exports.init = api => {
 
         const ext = pathLib.extname(src).toLowerCase().slice(1);
         
-        // 始終啟用異步處理
+        // 异步处理缩略图（使用防抖）
         if (SUPPORTED_AUDIO_EXTS.includes(ext)) {
-          extractAlbumCover(src).catch(e => debugLog(`異步專輯封面提取錯誤: ${e}`));
+          extractAlbumCover(src).catch(e => debugLog(`封面提取错误: ${e}`));
         } 
         else if (SUPPORTED_VIDEO_EXTS.includes(ext)) {
           extractVideoThumbnailAsync(src);
@@ -809,7 +977,6 @@ exports.init = api => {
           }
         }
 
-        // 等待500ms以避免短暫請求
         await new Promise(res => setTimeout(res, 500));
         if (ctx.socket.closed) return;
 
@@ -837,7 +1004,6 @@ exports.init = api => {
         const transcodeQuality = api.getConfig('transcode_quality') || 'balanced';
         const dsdConversionMode = api.getConfig('dsd_conversion_mode') || 'high';
 
-        // 解析額外的 FFmpeg 參數，支援引號
         const additionalParams = api.getConfig('ffmpeg_parameters') || '';
         const parsedAdditionalParams = additionalParams.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map(s => s.replace(/^['"]|['"]$/g, '')) || [];
 
@@ -849,7 +1015,6 @@ exports.init = api => {
 
         if (isAudio) {
           if (['dsf', 'dff', 'dsd'].includes(ext)) {
-            // DSD專用轉換參數
             const dsdParams = {
               standard: {
                 sampleRate: '44100',
@@ -924,7 +1089,6 @@ exports.init = api => {
             );
           }
         } else {
-          // 視頻轉碼 - 使用智能梯度參數
           let transcodeParams;
           try {
             const stats = await fsp.stat(src);
@@ -932,16 +1096,9 @@ exports.init = api => {
             const videoParams = await getVideoParams(src, fileSizeMB);
             transcodeParams = videoParams.transcode;
           } catch {
-            // 如果獲取參數失敗，使用默認質量
-            const defaultTranscodeParams = {
-              crf: 23,
-              preset: 'fast',
-              tune: 'film'
-            };
-            transcodeParams = defaultTranscodeParams;
+            transcodeParams = { crf: 23, preset: 'fast', tune: 'film' };
           }
 
-          // 根據轉碼質量調整參數
           let qualityArgs = [];
           switch (transcodeQuality) {
             case 'fast':
@@ -1003,26 +1160,23 @@ exports.init = api => {
         let confirmed = false;
         proc.on('spawn', () => {
           confirmed = true;
-          debugLog(`啟動FFmpeg進程 (PID: ${proc.pid}) 處理: ${pathLib.basename(src)}`);
-          if (['dsf', 'dff', 'dsd'].includes(ext)) {
-            debugLog(`DSD轉換模式: ${dsdConversionMode}`);
-          }
+          debugLog(`启动FFmpeg (PID: ${proc.pid}) 处理: ${pathLib.basename(src)}`);
         });
         
         proc.on('error', (err) => {
           if (!confirmed) running.delete(proc);
           cleanupProcess(proc);
-          debugLog(`FFmpeg進程錯誤: ${src} - ${err}`);
+          debugLog(`FFmpeg错误: ${src} - ${err}`);
         });
         
         proc.on('exit', (code) => {
           running.delete(proc);
           cleanupProcess(proc);
-          debugLog(`FFmpeg進程結束 (PID: ${proc.pid}) 代碼: ${code} - ${pathLib.basename(src)}`);
+          debugLog(`FFmpeg结束 (PID: ${proc.pid}) 代码: ${code} - ${pathLib.basename(src)}`);
         });
 
         if (api.getConfig('debug_ffmpeg')) {
-          proc.stderr.on('data', x => debugLog(`FFmpeg輸出: ${String(x)}`));
+          proc.stderr.on('data', x => debugLog(`FFmpeg输出: ${String(x)}`));
         }
 
         ctx.type = isAudio ? `audio/${outFormat}` : 'video/mp4';
@@ -1131,25 +1285,25 @@ exports.init = api => {
                 const isValid = await validateAudioFile(tempFile, outFormat);
                 if (isValid) {
                   await fsp.rename(tempFile, finalFile);
-                  debugLog(`緩存保存${isAcceptableError ? ' (使用錯誤解決方案)' : ''}: ${finalFile}`);
+                  debugLog(`缓存保存${isAcceptableError ? ' (使用错误解决)' : ''}: ${finalFile}`);
                 } else {
-                  debugLog(`緩存驗證失敗，刪除: ${tempFile}`);
+                  debugLog(`缓存验证失败，删除: ${tempFile}`);
                   await fsp.unlink(tempFile);
                 }
               } else {
-                debugLog(`緩存生成失敗，代碼 ${code}`);
+                debugLog(`缓存生成失败，代码 ${code}`);
                 try { await fsp.unlink(tempFile); } catch {}
               }
             });
 
             cacheProc.on('error', e => {
               cleanupProcess(cacheProc);
-              debugLog('緩存進程錯誤: ' + e);
+              debugLog('缓存进程错误: ' + e);
               fsp.unlink(tempFile).catch(() => {});
             });
 
           } catch (e) {
-            debugLog('緩存設置失敗: ' + e);
+            debugLog('缓存设置失败: ' + e);
           }
         }
       };
