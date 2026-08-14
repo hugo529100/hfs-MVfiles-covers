@@ -1,15 +1,15 @@
+// main.js - 完整的前端显示逻辑
 'use strict';
 {
   const { h } = HFS;
   const pluginConfig = HFS.getPluginConfig?.() || {};
   const audioExts = ['mp3', 'flac', 'wav', 'ape', 'aac', 'ogg', 'm4a', 'alac', 'dsf', 'dsd', 'aif', 'aiff', 'opus'];
-  const videoExts = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'mpeg', 'mpg', 'wmv', 'rmvb', 'rm', 'dat', 'ts', 'vob', 'flv', 'divx'];
+  const videoExts = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'mpeg', 'mpg', 'wmv', 'rmvb', 'rm', 'dat', 'ts', 'vob', 'flv', 'divx', 'm4v', '3gp'];
   
-  // ========== 封面加載開關設置 ==========
+  // ========== 封面加载开关设置 ==========
   const STORAGE_KEY_COVER_LOAD = 'hfs_media_cover_load_enabled';
   const COVER_TOGGLE_ID = 'media-cover-load-toggle';
   
-  // 檢查 localStorage 是否支持
   const isLocalStorageSupported = () => {
     try {
       localStorage.setItem('test', '1');
@@ -20,71 +20,37 @@
     }
   };
 
-  // 獲取封面加載狀態（默認為 true - 開啟）
   const getCoverLoadState = () => {
     if (!isLocalStorageSupported()) return true;
     const val = localStorage.getItem(STORAGE_KEY_COVER_LOAD);
     return val === null ? true : val === 'true';
   };
 
-  // 儲存封面加載狀態
   const setCoverLoadState = (value) => {
     if (isLocalStorageSupported()) {
       localStorage.setItem(STORAGE_KEY_COVER_LOAD, value ? 'true' : 'false');
     }
   };
 
-  // 全局變量來保存當前狀態
   let coverLoadEnabled = getCoverLoadState();
 
-  // ========== 靜默化控制台日誌 ==========
-  const originalLog = console.log;
-  const originalWarn = console.warn;
-  const originalError = console.error;
-  const originalDebug = console.debug;
-  const originalInfo = console.info;
-  
-  // 禁用所有前端控制台輸出
-  console.log = function() {};
-  console.warn = function() {};
-  console.error = function() {};
-  console.debug = function() {};
-  console.info = function() {};
-  
-  // 只在特定情況下恢復（用於調試）
+  // ========== 静默化控制台日志 ==========
   const debugMode = false;
-  if (debugMode) {
-    console.log = originalLog;
-    console.warn = originalWarn;
-    console.error = originalError;
-    console.debug = originalDebug;
-    console.info = originalInfo;
+  if (!debugMode) {
+    console.log = function() {};
+    console.warn = function() {};
+    console.error = function() {};
+    console.debug = function() {};
+    console.info = function() {};
   }
-  
-  // ========== 集中配置參數 ==========
-  const CONFIG = {
-    // 圖片初始化配置
-    IMAGE_INIT: {
-      GIF_DELAY: 250,
-      COVER_DELAY: 300,
-      REGULAR_DELAY: 250,
-    }
-  };
 
-  // ========== 全局緩存和狀態 ==========
+  // ========== 全局缓存和状态 ==========
   const errorCache = new Set();
-  const thumbCache = new WeakSet();
-  const processingUrls = new Set();
+  const loadedImagesCache = new Map();
   let entryFinalUrlCache = new WeakMap();
   let entryDecisionCache = new WeakMap();
-  const loadedImagesCache = new Map();
-  
-  // ========== HFS 狀態監聽 ==========
-  let currentPath = window.location.pathname;
-  let isNavigating = false;
-  let navigationTimeout = null;
 
-  // ========== 工具函數 ==========
+  // ========== 工具函数 ==========
   function normalizeUrlForKey(url) {
     try {
       const u = new URL(url, location.origin);
@@ -94,10 +60,6 @@
     }
   }
 
-  function getEntryKey(entry) {
-    return `${entry.uri}|${entry.name}|${entry.ext}`;
-  }
-  
   function getImageCacheKey(imgElement) {
     if (!imgElement) return null;
     const src = imgElement.src || imgElement.dataset?.originalSrc;
@@ -108,7 +70,7 @@
     return `${src}|${uri}|${name}`;
   }
 
-  // ========== 檢查是否為原生GIF文件 ==========
+  // ========== 检查是否为原生GIF文件 ==========
   function isNativeGifFile(entry) {
     const ext = entry.ext?.toLowerCase();
     if (ext !== 'gif') return false;
@@ -117,11 +79,22 @@
     if (url && url.includes('/cache/videothumbnail/')) {
       return false;
     }
-    
     return true;
   }
 
-  // ========== 單一路徑模式：封面URL處理 ==========
+  // ========== 判断是否为封面GIF（视频生成的GIF缩略图） ==========
+  function isCoverGif(entry) {
+    const ext = entry.ext?.toLowerCase();
+    if (ext !== 'gif') return false;
+    
+    const url = getCurrentCoverUrlSync(entry);
+    if (url && url.includes('/cache/videothumbnail/')) {
+      return true;
+    }
+    return false;
+  }
+
+  // ========== 单一路径模式：封面URL处理 ==========
   function getAllPossibleCoverUrls(entry) {
     if (isNativeGifFile(entry)) return [];
     
@@ -137,32 +110,39 @@
     
     const urls = [];
     
-    // 單一路徑模式：根據具體設置返回路徑
     if (pluginConfig.enableGraftMode) {
-      // 嫁接模式：強制指向自定義路徑，無回退機制
       if (isAudio) {
-        // 檢查是否啟用音樂封面嫁接
-        if (pluginConfig.graftMusicCovers !== false) { // 默認true
-          urls.push(`${pluginConfig.graftPath}${baseUri}cache/covers/${name}.jpg`);
+        if (pluginConfig.graftMusicCovers !== false) {
+          // 音乐封面：使用 ?get=thumb 参数
+          urls.push(`${pluginConfig.graftPath}${baseUri}cache/covers/${name}.jpg?get=thumb`);
         } else {
-          // 如果禁用音樂嫁接，就不使用任何封面
           return [];
         }
       } else if (isVideo) {
-        // 檢查是否啟用視頻封面嫁接
-        if (pluginConfig.graftVideoCovers !== false) { // 默認true
-          urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.${format}`);
+        if (pluginConfig.graftVideoCovers !== false) {
+          if (format === 'gif') {
+            // GIF 格式：不加 ?get=thumb 参数，使用原始地址
+            urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.gif`);
+          } else {
+            // JPG 格式：加 ?get=thumb 参数
+            urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.jpg?get=thumb`);
+          }
         } else {
-          // 如果禁用視頻嫁接，就不使用任何封面
           return [];
         }
       }
     } else {
-      // 普通模式：使用原始路徑
       if (isAudio) {
-        urls.push(`${baseUri}cache/covers/${name}.jpg`);
+        // 音乐封面：使用 ?get=thumb 参数
+        urls.push(`${baseUri}cache/covers/${name}.jpg?get=thumb`);
       } else if (isVideo) {
-        urls.push(`${baseUri}cache/videothumbnail/${name}.${format}`);
+        if (format === 'gif') {
+          // GIF 格式：不加 ?get=thumb 参数，使用原始地址
+          urls.push(`${baseUri}cache/videothumbnail/${name}.gif`);
+        } else {
+          // JPG 格式：加 ?get=thumb 参数
+          urls.push(`${baseUri}cache/videothumbnail/${name}.jpg?get=thumb`);
+        }
       }
     }
     
@@ -217,10 +197,7 @@
     }
   }
 
-  // ========== 移除點擊事件處理 ==========
-  // 原 handleMediaClick 函數已移除
-
-  // ========== 在Options界面中添加開關 ==========
+  // ========== 在Options界面中添加开关 ==========
   function insertCoverLoadToggle() {
     const optionsDialog = document.querySelector('.dialog[aria-modal="true"]');
     if (!optionsDialog || document.getElementById(COVER_TOGGLE_ID)) return;
@@ -228,7 +205,6 @@
     const themeSelect = document.getElementById('option-theme');
     if (!themeSelect) return;
 
-    // 創建簡單的開關元素
     const toggleHTML = `
       <div id="${COVER_TOGGLE_ID}" style="display:block;margin-top:1em">
         <label style="display:block;cursor:pointer">
@@ -238,74 +214,21 @@
       </div>
     `;
 
-    // 插入到theme選擇器後面
     themeSelect.insertAdjacentHTML('afterend', toggleHTML);
 
-    // 設置初始狀態
     const checkbox = document.getElementById('media-cover-load-checkbox');
     checkbox.checked = coverLoadEnabled;
 
-    // 添加事件監聽
     checkbox.addEventListener('change', (e) => {
       const newState = e.target.checked;
       coverLoadEnabled = newState;
       setCoverLoadState(coverLoadEnabled);
-      
-      // 立即刷新列表
       HFS.reloadList();
     });
   }
 
-  // ========== 監聽HFS導航事件 ==========
-  function setupNavigationListener() {
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
-    
-    history.pushState = function(...args) {
-      originalPushState.apply(this, args);
-      handleNavigation();
-    };
-    
-    history.replaceState = function(...args) {
-      originalReplaceState.apply(this, args);
-      handleNavigation();
-    };
-    
-    window.addEventListener('popstate', handleNavigation);
-    
-    HFS.onEvent('beforeNavigate', () => {
-      isNavigating = true;
-    });
-    
-    HFS.onEvent('navigated', () => {
-      isNavigating = false;
-      currentPath = window.location.pathname;
-    });
-  }
-  
-  function handleNavigation() {
-    if (isNavigating) return;
-    
-    const newPath = window.location.pathname;
-    if (newPath === currentPath) return;
-    
-    isNavigating = true;
-    currentPath = newPath;
-    
-    if (navigationTimeout) {
-      clearTimeout(navigationTimeout);
-    }
-    
-    navigationTimeout = setTimeout(() => {
-      isNavigating = false;
-    }, 500);
-  }
-
-  // ========== 系統初始化 ==========
+  // ========== 系统初始化 ==========
   function initializeSystem() {
-    setupNavigationListener();
-    
-    // 監聽Options對話框的出現
     const observer = new MutationObserver((mutations) => {
       if (document.querySelector('.dialog-title')?.textContent?.includes('Options')) {
         setTimeout(insertCoverLoadToggle, 100);
@@ -316,24 +239,8 @@
       childList: true,
       subtree: true
     });
-    
-    setTimeout(() => {
-      const mediaElements = document.querySelectorAll('.icon, .entry-icon, .media-icon, [class*="icon"]');
-      mediaElements.forEach(element => {
-        const parent = element.closest('[data-uri], [data-name]');
-        if (parent && (parent.dataset.uri || parent.dataset.name)) {
-          if (!window.MediaCoverPlugin) {
-            window.MediaCoverPlugin = {};
-          }
-          if (!window.MediaCoverPlugin.registeredEntries) {
-            window.MediaCoverPlugin.registeredEntries = [];
-          }
-        }
-      });
-    }, 500);
   }
 
-  // 頁面加載後初始化
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
       setTimeout(initializeSystem, 500);
@@ -342,9 +249,8 @@
     setTimeout(initializeSystem, 500);
   }
 
-  // ========== React 圖片組件 ==========
+  // ========== React 图片组件 ==========
   function ImgFallback({ fallback, tag = 'img', props, entry }) {
-    // 如果封面加載被禁用，直接返回fallback
     if (!coverLoadEnabled) {
       return fallback && h(fallback);
     }
@@ -356,6 +262,10 @@
     const mountedRef = HFS.React.useRef(true);
     const imgRef = HFS.React.useRef(null);
     const initTimeoutRef = HFS.React.useRef(null);
+
+    // 检查是否应该是懒加载：仅对 GIF 封面启用懒加载
+    const isGifCover = isCoverGif(entry);
+    const lazyLoading = pluginConfig.lazyLoading !== false && isGifCover;
 
     const imageType = HFS.React.useMemo(() => {
       if (isNativeGifFile(entry)) {
@@ -390,18 +300,6 @@
       
       let isActive = true;
       
-      const element = imgRef.current;
-      if (element && entry) {
-        if (!window.MediaCoverPlugin) {
-          window.MediaCoverPlugin = {};
-        }
-        if (!window.MediaCoverPlugin.registeredEntries) {
-          window.MediaCoverPlugin.registeredEntries = [];
-        }
-        
-        window.MediaCoverPlugin.registeredEntries.push({ entry, element });
-      }
-      
       initTimeoutRef.current = setTimeout(() => {
         if (!isActive || !mountedRef.current) return;
         
@@ -414,11 +312,6 @@
               return;
             }
 
-            if (imageType === 'cover-gif') {
-              if (isActive) setLocalSrc(currentUrl);
-              return;
-            }
-
             if (isActive) {
               setLocalSrc(currentUrl);
             }
@@ -428,7 +321,7 @@
         };
 
         initializeImage();
-      }, imageType === 'native-gif' ? 0 : CONFIG.IMAGE_INIT.COVER_DELAY);
+      }, 300);
 
       return () => {
         isActive = false;
@@ -491,12 +384,12 @@
       className: `${props.className || ''} thumbnail passthrough ${loaded ? 'loaded' : 'loading'} ${imageType}`,
       onLoad: handleLoad,
       onError: handleError,
-      loading: 'eager',
+      loading: lazyLoading ? 'lazy' : 'eager',
       decoding: 'async'
     });
   }
 
-  // ========== 事件監聽 ==========
+  // ========== 事件监听 ==========
   HFS.onEvent('listEntry', ({ entry }) => {
     const ext = entry.ext?.toLowerCase();
     
@@ -510,14 +403,6 @@
         for (const element of elements) {
           const parent = element.closest('[data-uri], [data-name]');
           if (parent && (parent.dataset.uri === entry.uri || parent.dataset.name === entry.name)) {
-            if (!window.MediaCoverPlugin) {
-              window.MediaCoverPlugin = {};
-            }
-            if (!window.MediaCoverPlugin.registeredEntries) {
-              window.MediaCoverPlugin.registeredEntries = [];
-            }
-            
-            window.MediaCoverPlugin.registeredEntries.push({ entry, element: element });
             break;
           }
         }
@@ -532,7 +417,6 @@
       const props = {
         className: `icon font-icon fa-file-image media-icon gif ${iconProps?.className || ''}`,
         title: iconProps?.title || 'GIF image',
-        // 移除了 onClick 事件
         role: 'img',
       };
       return h('span', props);
@@ -544,23 +428,25 @@
     const props = {
       className: `icon font-icon fa-${type} media-icon ${type} ${iconProps?.className || ''}`,
       title: iconProps?.title || `${type === 'audio' ? 'Audio' : 'Video'} file`,
-      // 移除了 onClick 事件
       role: 'img',
     };
     
     const fallbackSpan = () => h('span', props);
 
-    // 如果封面加載被禁用，直接返回圖標
     if (!coverLoadEnabled) {
       return h('span', props);
     }
+
+    // 判断是否为 GIF 封面，如果是则应用懒加载
+    const isGifCover = isCoverGif(entry);
+    const lazyLoading = pluginConfig.lazyLoading !== false && isGifCover;
 
     return h(ImgFallback, {
       fallback: fallbackSpan,
       props: {
         ...props,
         className: `${props.className} thumbnail passthrough`,
-        loading: 'eager',
+        loading: lazyLoading ? 'lazy' : 'eager',
         decoding: 'async',
       },
       entry: entry,
