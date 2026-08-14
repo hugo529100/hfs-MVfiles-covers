@@ -3,7 +3,7 @@ cool enough ~~~~ no need to say more
 
 ---
 
-This plugin needs to be used together with the **MODED-unsupported-videos** plugin, because MODED-unsupported-videos will extract cover images when you open music or video files and store them in the `\cache\videothumbnail` folder inside the corresponding directory.
+This plugin needs to be used together with the ffmpeg, because ffmpeg will extract cover images when you open music or video files and store them in the `\cache\videothumbnail` folder inside the corresponding directory.
 
 When browsing the frontend, if you're navigating through a large folder and feel that it's consuming too much memory, you can temporarily disable it in the options panel.
 
@@ -23,7 +23,7 @@ Recommended companion plugins:
 
 ---
 
-这份插件需要配搭MODED-unsupported-videos插件进行使用，因为MODED-unsupported-videos会在你打开音乐或视频文件的同时进行封面图的提取，并且贮存在对应文件夹的\cache\videothumbnail内。
+这份插件需要配搭ffmpeg进行使用，因为会在你打开音乐或视频文件的同时进行封面图的提取，并且贮存在对应文件夹的\cache\videothumbnail内。
 
 在前端页面浏览的时候 如果浏览巨大文件夹的时候，觉得占用页面内存资源，可以在options面板内进行临时性关闭。
 
@@ -42,4 +42,10 @@ thumbnails-main
 sharp-main
 
 https://github.com/user-attachments/assets/f6b83635-e37c-4658-ab8f-fcf57fd1abb9
+
+20260814:"It is now compatible with the native 'hfs-unsupported-videos' / 'rejetto/unsupported-videos' plugin, so the modified version of unsupported-videos that was previously included in my plugin has been removed."
+
+
+
+<img width="1080" height="6088" alt="Screenshot_2026-08-14-08-14-59-034_com android chrome" src="https://github.com/user-attachments/assets/0eba2ed9-6eab-4703-b50b-5cebafe44c1f" />
 
