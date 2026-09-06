@@ -34,6 +34,22 @@
 
   let coverLoadEnabled = getCoverLoadState();
 
+  // ========== 检测当前是否为列表模式 ==========
+  const isListMode = () => {
+    const listWrapper = document.querySelector('.list-wrapper');
+    if (!listWrapper) return false;
+    return listWrapper.classList.contains('list-mode');
+  };
+
+  // ========== 检测插件是否应处于活动状态 ==========
+  const isPluginActive = () => {
+    // 如果 pauseInListMode 启用且当前为列表模式，则暂停插件
+    if (pluginConfig.pauseInListMode !== false && isListMode()) {
+      return false;
+    }
+    return true;
+  };
+
   // ========== 静默化控制台日志 ==========
   const debugMode = false;
   if (!debugMode) {
@@ -113,7 +129,6 @@
     if (pluginConfig.enableGraftMode) {
       if (isAudio) {
         if (pluginConfig.graftMusicCovers !== false) {
-          // 音乐封面：使用 ?get=thumb 参数
           urls.push(`${pluginConfig.graftPath}${baseUri}cache/covers/${name}.jpg?get=thumb`);
         } else {
           return [];
@@ -121,10 +136,8 @@
       } else if (isVideo) {
         if (pluginConfig.graftVideoCovers !== false) {
           if (format === 'gif') {
-            // GIF 格式：不加 ?get=thumb 参数，使用原始地址
             urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.gif`);
           } else {
-            // JPG 格式：加 ?get=thumb 参数
             urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.jpg?get=thumb`);
           }
         } else {
@@ -133,14 +146,11 @@
       }
     } else {
       if (isAudio) {
-        // 音乐封面：使用 ?get=thumb 参数
         urls.push(`${baseUri}cache/covers/${name}.jpg?get=thumb`);
       } else if (isVideo) {
         if (format === 'gif') {
-          // GIF 格式：不加 ?get=thumb 参数，使用原始地址
           urls.push(`${baseUri}cache/videothumbnail/${name}.gif`);
         } else {
-          // JPG 格式：加 ?get=thumb 参数
           urls.push(`${baseUri}cache/videothumbnail/${name}.jpg?get=thumb`);
         }
       }
@@ -227,11 +237,39 @@
     });
   }
 
+  // ========== 监听视图模式切换 ==========
+  function setupViewModeObserver() {
+    const listWrapper = document.querySelector('.list-wrapper');
+    if (!listWrapper) return;
+
+    const observer = new MutationObserver(() => {
+      // 视图模式变化时刷新列表
+      HFS.reloadList();
+    });
+
+    observer.observe(listWrapper, {
+      attributes: true,
+      attributeFilter: ['class']
+    });
+  }
+
   // ========== 系统初始化 ==========
   function initializeSystem() {
+    // 设置视图模式观察器
+    setTimeout(setupViewModeObserver, 500);
+
     const observer = new MutationObserver((mutations) => {
       if (document.querySelector('.dialog-title')?.textContent?.includes('Options')) {
         setTimeout(insertCoverLoadToggle, 100);
+      }
+      // 检测列表容器是否出现
+      if (!document.querySelector('.list-wrapper')) {
+        return;
+      }
+      // 如果列表容器出现但还没有观察器，设置观察器
+      if (!document.querySelector('.list-wrapper').__viewObserver) {
+        setupViewModeObserver();
+        document.querySelector('.list-wrapper').__viewObserver = true;
       }
     });
 
@@ -251,6 +289,11 @@
 
   // ========== React 图片组件 ==========
   function ImgFallback({ fallback, tag = 'img', props, entry }) {
+    // 如果插件不活跃（列表模式+pauseInListMode启用），返回fallback
+    if (!isPluginActive()) {
+      return fallback && h(fallback);
+    }
+
     if (!coverLoadEnabled) {
       return fallback && h(fallback);
     }
@@ -423,6 +466,17 @@
     }
     
     if (![...audioExts, ...videoExts].includes(ext)) return;
+    
+    // 如果插件不活跃（列表模式+pauseInListMode启用），返回普通图标
+    if (!isPluginActive()) {
+      const type = audioExts.includes(ext) ? 'audio' : 'video';
+      const props = {
+        className: `icon font-icon fa-${type} media-icon ${type} ${iconProps?.className || ''}`,
+        title: iconProps?.title || `${type === 'audio' ? 'Audio' : 'Video'} file`,
+        role: 'img',
+      };
+      return h('span', props);
+    }
     
     const type = audioExts.includes(ext) ? 'audio' : 'video';
     const props = {

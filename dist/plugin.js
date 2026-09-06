@@ -1,6 +1,5 @@
-
 exports.repo = "Hug3O/MVfiles-covers"
-exports.version = 6.3
+exports.version = 6.4
 exports.description = "Complete media cover/thumbnail extraction and display system - supports video GIF/JPG thumbnails and audio cover extraction"
 exports.apiRequired = 12.91
 exports.frontend_js = 'main.js'
@@ -61,6 +60,14 @@ exports.config = {
     frontend: true,
     label: 'Lazy Loading for GIFs',
     helperText: 'Enable lazy loading for GIF thumbnails (reduces initial page load)',
+    xs: 6
+  },
+  pauseInListMode: {
+    type: 'boolean',
+    defaultValue: true,
+    frontend: true,
+    label: 'Pause in List Mode',
+    helperText: 'When enabled, covers will be hidden in list mode (shows only in tiles mode). Disable to show covers in all modes.',
     xs: 6
   },
 
@@ -232,7 +239,8 @@ exports.config = {
 exports.configDialog = { maxWidth: '55em' }
 
 exports.changelog = [
-  { version: 6.1, message: "Added lazyLoading option for GIF thumbnails" },
+  { version: 6.4, message: "Added pauseInListMode option - hides covers in list mode" },
+  { version: 6.3, message: "Added lazyLoading option for GIF thumbnails" },
   { version: 6.0, message: "Merged thumbnail extraction system - complete media cover/thumbnail solution" },
   { version: 5.9, message: "Added single-path graft mode support" },
   { version: 5.8, message: "Optimized cover loading performance" },
