@@ -630,8 +630,33 @@ exports.init = api => {
     } catch (e) {}
   }
 
+  // 清理因扩展名大小写 bug 产生的错误文件，例如：
+  //   A001C00530_260910_A4M8.MP4.gif
+  //   A001C00530_260910_A4M8.MP4.jpg
+  // 只匹配「视频扩展名 + 图片扩展名」的组合，避免误删正常文件
+  async function cleanupWrongNamedFiles(dir) {
+    try {
+      const files = await fsp.readdir(dir)
+      const wrongPattern = /\.(mp4|mkv|avi|mov|webm|flv|wmv|m4v|3gp|mpeg|mpg|ts|rmvb|rm|dat|vob|divx)\.(gif|jpg)$/i
+      await Promise.all(files.map(async file => {
+        if (wrongPattern.test(file)) {
+          await fsp.unlink(join(dir, file)).catch(() => {})
+          debugLog(`Removed wrong-named file: ${file}`)
+        }
+      }))
+    } catch (e) {}
+  }
+
   function getFileExtension(filePath) {
     return filePath.toLowerCase().split('.').pop() || ''
+  }
+
+  // 大小写无关地去掉最后一个扩展名
+  // 'A001C00530_260910_A4M8.MP4' -> 'A001C00530_260910_A4M8'
+  // 'abc.GIF' -> 'abc'
+  // 'noext' -> 'noext'
+  function stripExt(fileName) {
+    return fileName.replace(/\.[^.]+$/, '')
   }
 
   const SUPPORTED_VIDEO_EXTS = ['webm', 'avi', 'mkv', 'mp4', 'mov', 'mpg', 'wmv', 'ts', 'rmvb', 'rm', 'dat', 'vob', 'flv', 'm4v', '3gp', 'mpeg']
@@ -694,12 +719,14 @@ exports.init = api => {
 
       await cleanupZeroByteFiles(cacheDir)
 
-      const filename = basename(filePath, '.' + ext)
+      // 关键修复：大小写无关地去扩展名
+      const filename = stripExt(basename(filePath))
 
       if (isAudio) {
         // Audio cover extraction
         const coversDir = join(cacheDir, COVERS_DIR)
         await fsp.mkdir(coversDir, { recursive: true })
+        await cleanupWrongNamedFiles(coversDir)
         const coverPath = join(coversDir, `${filename}.jpg`)
 
         try {
@@ -722,6 +749,7 @@ exports.init = api => {
         // Video thumbnail extraction
         const videoDir = join(cacheDir, VIDEO_THUMBNAIL_DIR)
         await fsp.mkdir(videoDir, { recursive: true })
+        await cleanupWrongNamedFiles(videoDir)
 
         const format = api.getConfig('videoThumbFormat') || 'jpg'
         const thumbnailPath = join(videoDir, `${filename}.${format}`)
@@ -855,7 +883,9 @@ exports.init = api => {
       const ext = entry.ext?.toLowerCase()
       const audioExts = ['mp3', 'flac', 'wav', 'ape', 'aac', 'ogg', 'm4a', 'alac', 'dsf', 'dsd', 'aif', 'aiff', 'opus']
       const videoExts = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'mpeg', 'mpg', 'wmv', 'rmvb', 'rm', 'dat', 'ts', 'vob', 'flv', 'divx', 'm4v', '3gp']
-      const fileName = basename(entry.n, '.' + ext)
+
+      // 关键修复：大小写无关地去扩展名
+      const fileName = stripExt(entry.n)
 
       const enableGraftMode = api.getConfig('enableGraftMode') || false
       const graftPath = (api.getConfig('graftPath') || '/images/cache').trim()
