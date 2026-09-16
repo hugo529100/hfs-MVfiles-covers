@@ -4,6 +4,7 @@ exports.description = "Complete media cover/thumbnail extraction and display sys
 exports.apiRequired = 12.91
 exports.frontend_js = 'main.js'
 exports.frontend_css = 'style.css'
+exports.depend = [{ "repo": "rejetto/thumbnails", "version": 4 }]
 exports.afterPlugin = 'Musicplayer+'
 
 // ================ Configuration Panel ================
