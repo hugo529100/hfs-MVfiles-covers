@@ -9,53 +9,41 @@ exports.afterPlugin = 'Musicplayer+'
 
 // ================ Configuration Panel ================
 exports.config = {
-  // ===== Frontend Display Configuration =====
+  // ============================================
+  // === Configuration Group Selector ===
+  // ============================================
+  config_tab: {
+    type: 'select',
+    defaultValue: 'display',
+    options: {
+      '1. Display': 'display',
+      '2. Graft Mode': 'graft',
+      '3. Extraction': 'extraction',
+      '4. GIF Parameters': 'gif',
+      '5. System': 'system'
+    },
+    label: "Configuration Category",
+    helperText: "Select a category to view and edit settings.",
+    frontend: true
+  },
+
+  // ============================================
+  // === 1. Display ===
+  // ============================================
   videoThumbFormat: {
+    showIf: values => values.config_tab === 'display',
     type: 'select',
     options: [
       { value: 'jpg', label: 'JPG (Static)' },
       { value: 'gif', label: 'GIF (Animated)' }
     ],
-    defaultValue: 'jpg',
+    defaultValue: 'gif',
     frontend: true,
     label: 'Video Thumbnail Format',
     helperText: 'Preferred thumbnail format for videos'
   },
-  enableGraftMode: {
-    type: 'boolean',
-    defaultValue: false,
-    frontend: true,
-    label: 'Enable Single-Path Graft Mode',
-    helperText: 'When enabled, all cover paths will be redirected to the specified path below'
-  },
-  graftPath: {
-    type: 'vfs_path',
-    label: 'Graft Path',
-    folders: true,
-    files: false,
-    multiple: false,
-    showIf: values => values.enableGraftMode,
-    frontend: true,
-    defaultValue: '/images/cache',
-    helperText: 'Unified storage path for all media covers'
-  },
-  graftVideoCovers: {
-    type: 'boolean',
-    defaultValue: true,
-    frontend: true,
-    label: 'Graft Video Covers',
-    showIf: values => values.enableGraftMode,
-    helperText: 'When enabled, video thumbnails will be stored in the graft path'
-  },
-  graftMusicCovers: {
-    type: 'boolean',
-    defaultValue: true,
-    frontend: true,
-    label: 'Graft Music Covers',
-    showIf: values => values.enableGraftMode,
-    helperText: 'When enabled, music covers will be stored in the graft path'
-  },
   lazyLoading: {
+    showIf: values => values.config_tab === 'display',
     type: 'boolean',
     defaultValue: true,
     frontend: true,
@@ -64,6 +52,7 @@ exports.config = {
     xs: 6
   },
   pauseInListMode: {
+    showIf: values => values.config_tab === 'display',
     type: 'boolean',
     defaultValue: true,
     frontend: true,
@@ -72,16 +61,50 @@ exports.config = {
     xs: 6
   },
 
-  // ===== Backend Extraction Configuration =====
-  ffmpeg_path: {
-    type: 'real_path',
-    fileMask: 'ffmpeg*',
-    defaultValue: '',
-    label: 'FFmpeg Path',
-    helperText: 'Path to FFmpeg executable. Leave empty to use system PATH.',
-    xs: 8
+  // ============================================
+  // === 2. Graft Mode ===
+  // ============================================
+  enableGraftMode: {
+    showIf: values => values.config_tab === 'graft',
+    type: 'boolean',
+    defaultValue: false,
+    frontend: true,
+    label: 'Enable Single-Path Graft Mode',
+    helperText: 'When enabled, all cover paths will be redirected to the specified path below'
   },
+  graftPath: {
+    showIf: values => values.config_tab === 'graft' && values.enableGraftMode,
+    type: 'vfs_path',
+    label: 'Graft Path',
+    folders: true,
+    files: false,
+    multiple: false,
+    frontend: true,
+    defaultValue: '/images/cache',
+    helperText: 'Unified storage path for all media covers'
+  },
+  graftVideoCovers: {
+    showIf: values => values.config_tab === 'graft' && values.enableGraftMode,
+    type: 'boolean',
+    defaultValue: true,
+    frontend: true,
+    label: 'Graft Video Covers',
+    helperText: 'When enabled, video thumbnails will be stored in the graft path'
+  },
+  graftMusicCovers: {
+    showIf: values => values.config_tab === 'graft' && values.enableGraftMode,
+    type: 'boolean',
+    defaultValue: true,
+    frontend: true,
+    label: 'Graft Music Covers',
+    helperText: 'When enabled, music covers will be stored in the graft path'
+  },
+
+  // ============================================
+  // === 3. Extraction ===
+  // ============================================
   extract_video_thumbnails: {
+    showIf: values => values.config_tab === 'extraction',
     type: 'boolean',
     defaultValue: true,
     label: 'Enable Video Thumbnail Extraction',
@@ -89,128 +112,143 @@ exports.config = {
     xs: 6
   },
   extract_covers: {
+    showIf: values => values.config_tab === 'extraction',
     type: 'boolean',
     defaultValue: true,
     label: 'Enable Audio Cover Extraction',
     helperText: 'Extract embedded cover art from audio files',
     xs: 6
   },
+  ffmpeg_path: {
+    showIf: values => values.config_tab === 'extraction',
+    type: 'real_path',
+    fileMask: 'ffmpeg*',
+    defaultValue: '',
+    label: 'FFmpeg Path',
+    helperText: 'Path to FFmpeg executable. Leave empty to use system PATH.',
+    xs: 8
+  },
 
-  // ===== GIF Parameters =====
+  // ============================================
+  // === 4. GIF Parameters ===
+  // ============================================
   video_size_threshold: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'number',
     defaultValue: 250,
     min: 1,
     max: 10000,
     label: 'Video Size Threshold (MB)',
     helperText: 'Videos larger than this will use long video settings',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
   gif_width: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'number',
     min: 100,
     max: 800,
     defaultValue: 320,
     label: 'GIF Width (pixels)',
     helperText: 'Output GIF width, height auto-scaled',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
 
   // Short Video Settings
   short_video_start_time: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'string',
     defaultValue: '00:04:00',
     label: 'Short Video Start Time (HH:MM:SS)',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
   short_video_duration: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'number',
     min: 1,
     max: 60,
     defaultValue: 10,
     label: 'Short Video GIF Duration (seconds)',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
   short_video_fps: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'number',
     min: 1,
     max: 30,
     defaultValue: 5,
     label: 'Short Video GIF FPS',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
 
   // Long Video Settings
   long_video_start_time: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'string',
     defaultValue: '00:10:00',
     label: 'Long Video Start Time (HH:MM:SS)',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
   long_video_duration: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'number',
     min: 1,
     max: 60,
     defaultValue: 12,
     label: 'Long Video GIF Duration (seconds)',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
   long_video_fps: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'number',
     min: 1,
     max: 30,
     defaultValue: 6,
     label: 'Long Video GIF FPS',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
 
   // Backup Settings
   backup_video_start_time: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'string',
     defaultValue: '00:00:00',
     label: 'Backup Start Time (HH:MM:SS)',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
   backup_video_duration: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'number',
     min: 1,
     max: 60,
     defaultValue: 6,
     label: 'Backup GIF Duration (seconds)',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
   backup_video_fps: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     type: 'number',
     min: 1,
     max: 30,
     defaultValue: 5,
     label: 'Backup GIF FPS',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'gif',
     xs: 6
   },
 
   // JPG Parameters
   thumbnail_time: {
+    showIf: values => values.config_tab === 'gif' && values.extract_video_thumbnails && values.videoThumbFormat === 'jpg',
     type: 'string',
     defaultValue: '00:00:05',
     label: 'JPG Thumbnail Time Position',
     helperText: 'Time position for JPG thumbnail extraction (HH:MM:SS)',
-    showIf: values => values.extract_video_thumbnails && values.videoThumbFormat === 'jpg',
     xs: 6
   },
 
-  // ===== System Parameters =====
+  // ============================================
+  // === 5. System ===
+  // ============================================
   max_concurrent_thumbnail: {
+    showIf: values => values.config_tab === 'system',
     type: 'number',
     min: 1,
     max: 10,
@@ -220,6 +258,7 @@ exports.config = {
     xs: 6
   },
   thumbnail_debounce_delay: {
+    showIf: values => values.config_tab === 'system',
     type: 'number',
     min: 500,
     max: 10000,
@@ -229,6 +268,7 @@ exports.config = {
     xs: 6
   },
   debug_ffmpeg: {
+    showIf: values => values.config_tab === 'system',
     type: 'boolean',
     defaultValue: false,
     label: 'Debug Mode',
@@ -631,10 +671,6 @@ exports.init = api => {
     } catch (e) {}
   }
 
-  // 清理因扩展名大小写 bug 产生的错误文件，例如：
-  //   A001C00530_260910_A4M8.MP4.gif
-  //   A001C00530_260910_A4M8.MP4.jpg
-  // 只匹配「视频扩展名 + 图片扩展名」的组合，避免误删正常文件
   async function cleanupWrongNamedFiles(dir) {
     try {
       const files = await fsp.readdir(dir)
@@ -652,10 +688,6 @@ exports.init = api => {
     return filePath.toLowerCase().split('.').pop() || ''
   }
 
-  // 大小写无关地去掉最后一个扩展名
-  // 'A001C00530_260910_A4M8.MP4' -> 'A001C00530_260910_A4M8'
-  // 'abc.GIF' -> 'abc'
-  // 'noext' -> 'noext'
   function stripExt(fileName) {
     return fileName.replace(/\.[^.]+$/, '')
   }
@@ -720,11 +752,9 @@ exports.init = api => {
 
       await cleanupZeroByteFiles(cacheDir)
 
-      // 关键修复：大小写无关地去扩展名
       const filename = stripExt(basename(filePath))
 
       if (isAudio) {
-        // Audio cover extraction
         const coversDir = join(cacheDir, COVERS_DIR)
         await fsp.mkdir(coversDir, { recursive: true })
         await cleanupWrongNamedFiles(coversDir)
@@ -747,7 +777,6 @@ exports.init = api => {
       }
 
       if (isVideo) {
-        // Video thumbnail extraction
         const videoDir = join(cacheDir, VIDEO_THUMBNAIL_DIR)
         await fsp.mkdir(videoDir, { recursive: true })
         await cleanupWrongNamedFiles(videoDir)
@@ -787,7 +816,6 @@ exports.init = api => {
               params: { time }
             })
           } else {
-            // GIF mode - try multiple parameter combinations
             let success = false
             const attempts = isLongVideo
               ? [gradientParams.LONG, gradientParams.SHORT, gradientParams.BACKUP]
@@ -857,7 +885,6 @@ exports.init = api => {
     })
   }
 
-  // Check FFmpeg (only once, output always shown as it's important)
   setTimeout(() => checkFFmpeg(), 1000)
 
   // ================ Export API ================
@@ -873,19 +900,16 @@ exports.init = api => {
       debugLog('[Thumbnail] All resources cleaned up')
     },
 
-    // Public API
     extractThumbnail: extractThumbnailWithDebounce,
     getQueueStatus() {
       return thumbnailQueue.getStatus()
     },
 
-    // Core: Scan directory entries, mark covers
     onDirEntry({ entry, node }) {
       const ext = entry.ext?.toLowerCase()
       const audioExts = ['mp3', 'flac', 'wav', 'ape', 'aac', 'ogg', 'm4a', 'alac', 'dsf', 'dsd', 'aif', 'aiff', 'opus']
       const videoExts = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'mpeg', 'mpg', 'wmv', 'rmvb', 'rm', 'dat', 'ts', 'vob', 'flv', 'divx', 'm4v', '3gp']
 
-      // 关键修复：大小写无关地去扩展名
       const fileName = stripExt(entry.n)
 
       const enableGraftMode = api.getConfig('enableGraftMode') || false
@@ -893,7 +917,6 @@ exports.init = api => {
       const graftVideoCovers = api.getConfig('graftVideoCovers') !== false
       const graftMusicCovers = api.getConfig('graftMusicCovers') !== false
 
-      // Trigger async thumbnail extraction
       if (audioExts.includes(ext) || videoExts.includes(ext)) {
         const filePath = join(node.path, entry.n)
         extractThumbnailWithDebounce(filePath).catch(e => {
@@ -902,7 +925,6 @@ exports.init = api => {
       }
 
       if (audioExts.includes(ext)) {
-        // Audio files: check for cover
         if (enableGraftMode && graftMusicCovers) {
           const graftCoverPath = join(graftPath, node.path, CACHE_DIR, COVERS_DIR, fileName + '.jpg')
           if (fs.existsSync(graftCoverPath)) {
@@ -923,7 +945,6 @@ exports.init = api => {
           }
         }
       } else if (videoExts.includes(ext)) {
-        // Video files: check for thumbnail based on config
         const preferred = api.getConfig('videoThumbFormat') || 'jpg'
         const formats = preferred === 'gif' ? ['gif', 'jpg'] : ['jpg', 'gif']
 
@@ -964,7 +985,6 @@ exports.init = api => {
 
         const ext = getFileExtension(src)
 
-        // Async thumbnail extraction
         if (SUPPORTED_AUDIO_EXTS.includes(ext) || SUPPORTED_VIDEO_EXTS.includes(ext)) {
           extractThumbnailWithDebounce(src).catch(e => {
             debugLog(`Thumbnail extraction error: ${e.message}`)
