@@ -34,6 +34,15 @@
 
   let coverLoadEnabled = getCoverLoadState();
 
+  // ========== 全局重试机制 ==========
+  const globalRetryListeners = new Set();
+
+  function triggerGlobalRetry() {
+    for (const fn of globalRetryListeners) {
+      try { fn(); } catch (e) {}
+    }
+  }
+
   // ========== 检测当前是否为列表模式 ==========
   const isListMode = () => {
     const listWrapper = document.querySelector('.list-wrapper');
@@ -47,11 +56,9 @@
   };
 
   // ========== 检测插件是否应处于活动状态 ==========
+  // 不再因 fileshow 返回 false，避免 React 卸载 <img>，保证 suspend/resume 可恢复
   const isPluginActive = () => {
     if (pluginConfig.pauseInListMode !== false && isListMode()) {
-      return false;
-    }
-    if (pluginConfig.pauseInFileShow !== false && isFileShowMode()) {
       return false;
     }
     return true;
@@ -241,43 +248,46 @@
     });
   }
 
-  // ========== 缩略图暂停 / 恢复（DOM 就地替换，不刷新列表） ==========
+  // ========== 缩略图暂停 / 恢复 ==========
 
-  // 把当前列表中所有已加载的缩略图暂时“撤下”，换回普通图标外观。
-  // 注意：不移除 <img> 元素，只是把 src 保存到 dataset 并清空，同时加一个 class 隐藏它。
-  // 这样 React 的 DOM 结构不变，关闭 fileshow 后可以精确还原，不会闪烁。
+  // 只有确实在 fileshow 才 suspend，避免 MutationObserver 抖动导致反复暂停/恢复
   function suspendThumbnails() {
+    if (!isFileShowMode()) return;
     try {
       const imgs = document.querySelectorAll('img.thumbnail.passthrough');
       for (const img of imgs) {
-        if (img.dataset.suspendedSrc) continue; // 已暂停过，跳过
+        if (img.dataset.suspendedSrc) continue;
         const currentSrc = img.getAttribute('src');
         if (currentSrc) {
           img.dataset.suspendedSrc = currentSrc;
         }
-        // 清空 src，浏览器不会继续请求，视觉上回退到父容器的背景/图标
         img.removeAttribute('src');
         img.classList.add('thumbnail-suspended');
       }
     } catch (e) {}
   }
 
-  // 恢复被暂停的缩略图
+  // 恢复被暂停的缩略图，并触发全局 retry
   function resumeThumbnails() {
     try {
-      const imgs = document.querySelectorAll('img.thumbnail.passthrough.thumbnail-suspended');
+      const imgs = document.querySelectorAll('img.thumbnail.passthrough');
       for (const img of imgs) {
         const savedSrc = img.dataset.suspendedSrc;
         if (savedSrc) {
           img.setAttribute('src', savedSrc);
-          delete img.dataset.suspendedSrc;
         }
+        // 无论有没有 savedSrc 都清理，防止残留
+        delete img.dataset.suspendedSrc;
         img.classList.remove('thumbnail-suspended');
       }
     } catch (e) {}
+
+    setTimeout(() => {
+      triggerGlobalRetry();
+    }, 100);
   }
 
-  // ========== 注入样式：让被暂停的 img 不占据视觉空间，露出底层图标 ==========
+  // ========== 注入样式：让被暂停的 img 不占据视觉空间 ==========
   function injectSuspendStyles() {
     if (document.getElementById('media-cover-suspend-style')) return;
     const style = document.createElement('style');
@@ -296,7 +306,6 @@
     const listWrapper = document.querySelector('.list-wrapper');
     if (!listWrapper) return;
 
-    // 监听列表模式切换（保持原有行为：刷新列表）
     if (!listWrapper.__viewObserver) {
       const listObserver = new MutationObserver(() => {
         HFS.reloadList();
@@ -308,7 +317,6 @@
       listWrapper.__viewObserver = true;
     }
 
-    // 监听 fileshow 界面出现/消失 —— 只暂停/恢复缩略图，不刷新列表
     if (!document.body.__fileShowObserver) {
       let lastFileShowState = isFileShowMode();
       let fileShowTimer = null;
@@ -382,6 +390,18 @@
     const mountedRef = HFS.React.useRef(true);
     const imgRef = HFS.React.useRef(null);
     const initTimeoutRef = HFS.React.useRef(null);
+    const retryTimeoutRef = HFS.React.useRef(null);
+
+    const loadedRef = HFS.React.useRef(false);
+    const localSrcRef = HFS.React.useRef('');
+
+    HFS.React.useEffect(() => {
+      loadedRef.current = loaded;
+    }, [loaded]);
+
+    HFS.React.useEffect(() => {
+      localSrcRef.current = localSrc;
+    }, [localSrc]);
 
     const isGifCover = isCoverGif(entry);
     const lazyLoading = pluginConfig.lazyLoading !== false && isGifCover;
@@ -405,40 +425,57 @@
         if (initTimeoutRef.current) {
           clearTimeout(initTimeoutRef.current);
         }
+        if (retryTimeoutRef.current) {
+          clearTimeout(retryTimeoutRef.current);
+        }
       };
     }, []);
 
+    // 全局 retry 监听
+    HFS.React.useEffect(() => {
+      const fn = () => {
+        if (!mountedRef.current) return;
+        if (loadedRef.current && localSrcRef.current) return;
+        setErr(false);
+        setLoaded(false);
+        setRetryKey(prev => prev + 1);
+      };
+      globalRetryListeners.add(fn);
+      return () => globalRetryListeners.delete(fn);
+    }, []);
+
+    // 初始化 + 500ms 自愈重试
     HFS.React.useEffect(() => {
       if (imageType === 'native-gif') {
-        setLocalSrc(`${entry.uri}`);
+        setLocalSrc(entry.uri);
         return;
       }
 
       let isActive = true;
 
-      initTimeoutRef.current = setTimeout(() => {
+      const tryInit = (attempt = 0) => {
         if (!isActive || !mountedRef.current) return;
 
-        const initializeImage = async () => {
-          try {
-            const currentUrl = getCurrentCoverUrlSync(entry);
-            if (!currentUrl) {
-              if (isActive) setErr(true);
-              return;
-            }
-            if (isActive) {
-              setLocalSrc(currentUrl);
-            }
-          } catch (error) {
-            if (isActive) setErr(true);
-          }
-        };
+        const url = getCurrentCoverUrlSync(entry);
+        if (url) {
+          setLocalSrc(url);
+          setErr(false);
+          return;
+        }
 
-        initializeImage();
-      }, 300);
+        if (attempt < 20) {
+          retryTimeoutRef.current = setTimeout(() => tryInit(attempt + 1), 500);
+        } else {
+          if (isActive) setErr(true);
+        }
+      };
+
+      initTimeoutRef.current = setTimeout(() => tryInit(0), 300);
 
       return () => {
         isActive = false;
+        clearTimeout(initTimeoutRef.current);
+        clearTimeout(retryTimeoutRef.current);
       };
     }, [entry, retryKey, imageType]);
 
@@ -446,6 +483,9 @@
       if (!mountedRef.current) return;
       try {
         const el = e.target;
+        // 清理可能残留的 suspend 标记
+        delete el.dataset.suspendedSrc;
+        el.classList.remove('thumbnail-suspended');
         setTimeout(() => {
           if (mountedRef.current) {
             setLoaded(true);
@@ -485,6 +525,7 @@
       return fallback && h(fallback);
     }
 
+    // 保留原来的 className 拼接方式，让 HFS / 主题的淡入逻辑继续生效
     return h(tag, {
       ...props,
       src: localSrc,
@@ -559,6 +600,7 @@
     const isGifCover = isCoverGif(entry);
     const lazyLoading = pluginConfig.lazyLoading !== false && isGifCover;
 
+    // 恢复成原来的 props 传递方式，保留 icon 类，让淡入逻辑不受影响
     return h(ImgFallback, {
       fallback: fallbackSpan,
       props: {
