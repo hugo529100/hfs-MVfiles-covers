@@ -389,8 +389,6 @@
     const [retryKey, setRetryKey] = HFS.React.useState(0);
     const mountedRef = HFS.React.useRef(true);
     const imgRef = HFS.React.useRef(null);
-    const initTimeoutRef = HFS.React.useRef(null);
-    const retryTimeoutRef = HFS.React.useRef(null);
 
     const loadedRef = HFS.React.useRef(false);
     const localSrcRef = HFS.React.useRef('');
@@ -422,16 +420,10 @@
     HFS.React.useEffect(() => {
       return () => {
         mountedRef.current = false;
-        if (initTimeoutRef.current) {
-          clearTimeout(initTimeoutRef.current);
-        }
-        if (retryTimeoutRef.current) {
-          clearTimeout(retryTimeoutRef.current);
-        }
       };
     }, []);
 
-    // 全局 retry 监听
+    // 全局 retry 监听：fileshow 关闭后重新尝试一次
     HFS.React.useEffect(() => {
       const fn = () => {
         if (!mountedRef.current) return;
@@ -444,39 +436,21 @@
       return () => globalRetryListeners.delete(fn);
     }, []);
 
-    // 初始化 + 500ms 自愈重试
+    // 初始化：立即算 URL，算不出立即回退，不等待、不重试
     HFS.React.useEffect(() => {
       if (imageType === 'native-gif') {
         setLocalSrc(entry.uri);
         return;
       }
 
-      let isActive = true;
-
-      const tryInit = (attempt = 0) => {
-        if (!isActive || !mountedRef.current) return;
-
-        const url = getCurrentCoverUrlSync(entry);
-        if (url) {
-          setLocalSrc(url);
-          setErr(false);
-          return;
-        }
-
-        if (attempt < 20) {
-          retryTimeoutRef.current = setTimeout(() => tryInit(attempt + 1), 500);
-        } else {
-          if (isActive) setErr(true);
-        }
-      };
-
-      initTimeoutRef.current = setTimeout(() => tryInit(0), 300);
-
-      return () => {
-        isActive = false;
-        clearTimeout(initTimeoutRef.current);
-        clearTimeout(retryTimeoutRef.current);
-      };
+      const url = getCurrentCoverUrlSync(entry);
+      if (url) {
+        setLocalSrc(url);
+        setErr(false);
+      } else {
+        // 算不出 URL，立即回退图标
+        setErr(true);
+      }
     }, [entry, retryKey, imageType]);
 
     const handleLoad = async (e) => {
@@ -510,9 +484,12 @@
 
         if (imageType === 'cover' || imageType === 'cover-gif') {
           markCurrentUrlFailed(entry, localSrc);
-          if (!pluginConfig.enableGraftMode) {
-            setRetryKey(prev => prev + 1);
+          // 尝试下一个候选（仅 graft 模式多候选时有意义）
+          const next = getCurrentCoverUrlSync(entry);
+          if (next && next !== localSrc) {
+            setLocalSrc(next);
           } else {
+            // 没有候选，立即回退图标
             setErr(true);
           }
         } else {
@@ -525,7 +502,6 @@
       return fallback && h(fallback);
     }
 
-    // 保留原来的 className 拼接方式，让 HFS / 主题的淡入逻辑继续生效
     return h(tag, {
       ...props,
       src: localSrc,
@@ -600,7 +576,6 @@
     const isGifCover = isCoverGif(entry);
     const lazyLoading = pluginConfig.lazyLoading !== false && isGifCover;
 
-    // 恢复成原来的 props 传递方式，保留 icon 类，让淡入逻辑不受影响
     return h(ImgFallback, {
       fallback: fallbackSpan,
       props: {
