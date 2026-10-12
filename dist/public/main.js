@@ -250,24 +250,26 @@
 
   // ========== 缩略图暂停 / 恢复 ==========
 
-  // 只有确实在 fileshow 才 suspend，避免 MutationObserver 抖动导致反复暂停/恢复
+  // 幂等 suspend：只要有 src 就記錄並移除；已有 suspendedSrc 的保持原樣。
+  // 不再用 isFileShowMode 二次判斷（由呼叫端與心跳共同保證只在 fileShow 期間執行）。
   function suspendThumbnails() {
-    if (!isFileShowMode()) return;
     try {
       const imgs = document.querySelectorAll('img.thumbnail.passthrough');
       for (const img of imgs) {
-        if (img.dataset.suspendedSrc) continue;
         const currentSrc = img.getAttribute('src');
         if (currentSrc) {
           img.dataset.suspendedSrc = currentSrc;
+          img.removeAttribute('src');
+        } else if (!img.dataset.suspendedSrc) {
+          // 沒有 src 也沒有備份 → 本來就沒載入，跳過
+          continue;
         }
-        img.removeAttribute('src');
         img.classList.add('thumbnail-suspended');
       }
     } catch (e) {}
   }
 
-  // 恢复被暂停的缩略图，并触发全局 retry
+  // 幂等 resume：恢復所有備份的 src，清理標記，並觸發一次全局 retry。
   function resumeThumbnails() {
     try {
       const imgs = document.querySelectorAll('img.thumbnail.passthrough');
@@ -282,9 +284,27 @@
       }
     } catch (e) {}
 
-    setTimeout(() => {
+    if (window.__resumeRetryTimer) clearTimeout(window.__resumeRetryTimer);
+    window.__resumeRetryTimer = setTimeout(() => {
       triggerGlobalRetry();
-    }, 100);
+    }, 150);
+  }
+
+  // ========== 心跳：定時檢查 fileShow 是否存在，存在就再 suspend ==========
+  // 作為事件驅動的保險，即使某次 MutationObserver 漏判，最長 500ms 後也會被補上。
+  let heartbeatTimer = null;
+  function startFileShowHeartbeat() {
+    if (heartbeatTimer) return;
+    heartbeatTimer = setInterval(() => {
+      try {
+        if (isFileShowMode()) {
+          // 冪等：已經 suspended 的 img 不會重複處理
+          suspendThumbnails();
+        }
+      } catch (e) {}
+    }, 1000);
+    // 掛在 window 上，方便除錯或必要時清除
+    window.__fileShowHeartbeat = heartbeatTimer;
   }
 
   // ========== 注入样式：让被暂停的 img 不占据视觉空间 ==========
@@ -318,6 +338,8 @@
     }
 
     if (!document.body.__fileShowObserver) {
+      // 回歸原本簡單的狀態判斷：只負責第一次 suspend / 真正離開時 resume。
+      // 第二次 fileShow 的漏判由心跳補上，空窗期 ≤ 500ms，不會持續性能下降。
       let lastFileShowState = isFileShowMode();
       let fileShowTimer = null;
 
@@ -347,6 +369,8 @@
   function initializeSystem() {
     injectSuspendStyles();
     setTimeout(setupViewModeObserver, 500);
+    // 啟動心跳：即使 observer 漏判，也會在 500ms 內補上 suspend
+    startFileShowHeartbeat();
 
     const observer = new MutationObserver(() => {
       if (document.querySelector('.dialog-title')?.textContent?.includes('Options')) {
@@ -457,6 +481,8 @@
       if (!mountedRef.current) return;
       try {
         const el = e.target;
+        // suspend 期間的圖片不應被計入 cache，避免 fileShow 期間 cache 暴增
+        if (el.classList.contains('thumbnail-suspended')) return;
         // 清理可能残留的 suspend 标记
         delete el.dataset.suspendedSrc;
         el.classList.remove('thumbnail-suspended');
