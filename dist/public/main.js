@@ -6,7 +6,6 @@
   const audioExts = ['mp3', 'flac', 'wav', 'ape', 'aac', 'ogg', 'm4a', 'alac', 'dsf', 'dsd', 'aif', 'aiff', 'opus'];
   const videoExts = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'mpeg', 'mpg', 'wmv', 'rmvb', 'rm', 'dat', 'ts', 'vob', 'flv', 'divx', 'm4v', '3gp'];
 
-  // ========== 封面加载开关设置 ==========
   const STORAGE_KEY_COVER_LOAD = 'hfs_media_cover_load_enabled';
   const COVER_TOGGLE_ID = 'media-cover-load-toggle';
 
@@ -34,7 +33,6 @@
 
   let coverLoadEnabled = getCoverLoadState();
 
-  // ========== 全局重试机制 ==========
   const globalRetryListeners = new Set();
 
   function triggerGlobalRetry() {
@@ -43,20 +41,16 @@
     }
   }
 
-  // ========== 检测当前是否为列表模式 ==========
   const isListMode = () => {
     const listWrapper = document.querySelector('.list-wrapper');
     if (!listWrapper) return false;
     return listWrapper.classList.contains('list-mode');
   };
 
-  // ========== 检测当前是否为文件预览/播放界面 ==========
   const isFileShowMode = () => {
     return !!document.querySelector('.dialog-backdrop.file-show');
   };
 
-  // ========== 检测插件是否应处于活动状态 ==========
-  // 不再因 fileshow 返回 false，避免 React 卸载 <img>，保证 suspend/resume 可恢复
   const isPluginActive = () => {
     if (pluginConfig.pauseInListMode !== false && isListMode()) {
       return false;
@@ -64,7 +58,6 @@
     return true;
   };
 
-  // ========== 静默化控制台日志 ==========
   const debugMode = false;
   if (!debugMode) {
     console.log = function() {};
@@ -74,13 +67,11 @@
     console.info = function() {};
   }
 
-  // ========== 全局缓存和状态 ==========
   const errorCache = new Set();
   const loadedImagesCache = new Map();
   let entryFinalUrlCache = new WeakMap();
   let entryDecisionCache = new WeakMap();
 
-  // ========== 工具函数 ==========
   function normalizeUrlForKey(url) {
     try {
       const u = new URL(url, location.origin);
@@ -100,7 +91,6 @@
     return `${src}|${uri}|${name}`;
   }
 
-  // ========== 检查是否为原生GIF文件 ==========
   function isNativeGifFile(entry) {
     const ext = entry.ext?.toLowerCase();
     if (ext !== 'gif') return false;
@@ -111,7 +101,6 @@
     return true;
   }
 
-  // ========== 判断是否为封面GIF ==========
   function isCoverGif(entry) {
     const ext = entry.ext?.toLowerCase();
     if (ext !== 'gif') return false;
@@ -122,7 +111,6 @@
     return false;
   }
 
-  // ========== 封面URL处理 ==========
   function getAllPossibleCoverUrls(entry) {
     if (isNativeGifFile(entry)) return [];
 
@@ -218,7 +206,6 @@
     }
   }
 
-  // ========== Options 界面开关 ==========
   function insertCoverLoadToggle() {
     const optionsDialog = document.querySelector('.dialog[aria-modal="true"]');
     if (!optionsDialog || document.getElementById(COVER_TOGGLE_ID)) return;
@@ -248,10 +235,6 @@
     });
   }
 
-  // ========== 缩略图暂停 / 恢复 ==========
-
-  // 幂等 suspend：只要有 src 就記錄並移除；已有 suspendedSrc 的保持原樣。
-  // 不再用 isFileShowMode 二次判斷（由呼叫端與心跳共同保證只在 fileShow 期間執行）。
   function suspendThumbnails() {
     try {
       const imgs = document.querySelectorAll('img.thumbnail.passthrough');
@@ -261,7 +244,6 @@
           img.dataset.suspendedSrc = currentSrc;
           img.removeAttribute('src');
         } else if (!img.dataset.suspendedSrc) {
-          // 沒有 src 也沒有備份 → 本來就沒載入，跳過
           continue;
         }
         img.classList.add('thumbnail-suspended');
@@ -269,16 +251,15 @@
     } catch (e) {}
   }
 
-  // 幂等 resume：恢復所有備份的 src，清理標記，並觸發一次全局 retry。
   function resumeThumbnails() {
     try {
       const imgs = document.querySelectorAll('img.thumbnail.passthrough');
       for (const img of imgs) {
         const savedSrc = img.dataset.suspendedSrc;
-        if (savedSrc) {
+        // ★ 改动2：如果滚动层仍挂起，不恢复 src
+        if (savedSrc && !img.classList.contains('scroll-suspended')) {
           img.setAttribute('src', savedSrc);
         }
-        // 无论有没有 savedSrc 都清理，防止残留
         delete img.dataset.suspendedSrc;
         img.classList.remove('thumbnail-suspended');
       }
@@ -290,24 +271,19 @@
     }, 150);
   }
 
-  // ========== 心跳：定時檢查 fileShow 是否存在，存在就再 suspend ==========
-  // 作為事件驅動的保險，即使某次 MutationObserver 漏判，最長 500ms 後也會被補上。
   let heartbeatTimer = null;
   function startFileShowHeartbeat() {
     if (heartbeatTimer) return;
     heartbeatTimer = setInterval(() => {
       try {
         if (isFileShowMode()) {
-          // 冪等：已經 suspended 的 img 不會重複處理
           suspendThumbnails();
         }
       } catch (e) {}
     }, 1000);
-    // 掛在 window 上，方便除錯或必要時清除
     window.__fileShowHeartbeat = heartbeatTimer;
   }
 
-  // ========== 注入样式：让被暂停的 img 不占据视觉空间 ==========
   function injectSuspendStyles() {
     if (document.getElementById('media-cover-suspend-style')) return;
     const style = document.createElement('style');
@@ -321,7 +297,6 @@
     document.head.appendChild(style);
   }
 
-  // ========== 监听视图模式切换 与 fileshow 界面出现/消失 ==========
   function setupViewModeObserver() {
     const listWrapper = document.querySelector('.list-wrapper');
     if (!listWrapper) return;
@@ -338,8 +313,6 @@
     }
 
     if (!document.body.__fileShowObserver) {
-      // 回歸原本簡單的狀態判斷：只負責第一次 suspend / 真正離開時 resume。
-      // 第二次 fileShow 的漏判由心跳補上，空窗期 ≤ 500ms，不會持續性能下降。
       let lastFileShowState = isFileShowMode();
       let fileShowTimer = null;
 
@@ -365,11 +338,9 @@
     }
   }
 
-  // ========== 系统初始化 ==========
   function initializeSystem() {
     injectSuspendStyles();
     setTimeout(setupViewModeObserver, 500);
-    // 啟動心跳：即使 observer 漏判，也會在 500ms 內補上 suspend
     startFileShowHeartbeat();
 
     const observer = new MutationObserver(() => {
@@ -397,7 +368,6 @@
     setTimeout(initializeSystem, 500);
   }
 
-  // ========== React 图片组件 ==========
   function ImgFallback({ fallback, tag = 'img', props, entry }) {
     if (!isPluginActive()) {
       return fallback && h(fallback);
@@ -447,7 +417,6 @@
       };
     }, []);
 
-    // 全局 retry 监听：fileshow 关闭后重新尝试一次
     HFS.React.useEffect(() => {
       const fn = () => {
         if (!mountedRef.current) return;
@@ -460,7 +429,6 @@
       return () => globalRetryListeners.delete(fn);
     }, []);
 
-    // 初始化：立即算 URL，算不出立即回退，不等待、不重试
     HFS.React.useEffect(() => {
       if (imageType === 'native-gif') {
         setLocalSrc(entry.uri);
@@ -472,7 +440,6 @@
         setLocalSrc(url);
         setErr(false);
       } else {
-        // 算不出 URL，立即回退图标
         setErr(true);
       }
     }, [entry, retryKey, imageType]);
@@ -481,9 +448,9 @@
       if (!mountedRef.current) return;
       try {
         const el = e.target;
-        // suspend 期間的圖片不應被計入 cache，避免 fileShow 期間 cache 暴增
-        if (el.classList.contains('thumbnail-suspended')) return;
-        // 清理可能残留的 suspend 标记
+        // ★ 改动3：同时忽略滚动中断与 fileShow 挂起
+        if (el.classList.contains('thumbnail-suspended') ||
+            el.classList.contains('scroll-suspended')) return;
         delete el.dataset.suspendedSrc;
         el.classList.remove('thumbnail-suspended');
         setTimeout(() => {
@@ -502,20 +469,21 @@
       } catch (error) {}
     };
 
-    const handleError = () => {
+    // ★ 改动1：忽略滚动中断 / fileShow 挂起导致的 error
+    const handleError = (e) => {
       if (!mountedRef.current) return;
+      if (e?.target?.classList?.contains('scroll-suspended') ||
+          e?.target?.classList?.contains('thumbnail-suspended')) return;
       try {
         const normalizedUrl = normalizeUrlForKey(localSrc);
         errorCache.add(normalizedUrl);
 
         if (imageType === 'cover' || imageType === 'cover-gif') {
           markCurrentUrlFailed(entry, localSrc);
-          // 尝试下一个候选（仅 graft 模式多候选时有意义）
           const next = getCurrentCoverUrlSync(entry);
           if (next && next !== localSrc) {
             setLocalSrc(next);
           } else {
-            // 没有候选，立即回退图标
             setErr(true);
           }
         } else {
@@ -543,7 +511,6 @@
     });
   }
 
-  // ========== 事件监听 ==========
   HFS.onEvent('listEntry', ({ entry }) => {
     const ext = entry.ext?.toLowerCase();
     if (isNativeGifFile(entry)) return;
