@@ -1,4 +1,4 @@
-// main.js - 完整的前端显示逻辑
+// main.js - 完整的前端显示逻辑（修复版：lazyload 稳健性）
 'use strict';
 {
   const { h } = HFS;
@@ -33,6 +33,8 @@
 
   let coverLoadEnabled = getCoverLoadState();
 
+  // 全局 retry 监听：现在每个 listener 会收到“是否需要强制重试”的判断，
+  // 只有 err === true 的实例才会真正重试（见 ImgFallback 内注册逻辑）。
   const globalRetryListeners = new Set();
 
   function triggerGlobalRetry() {
@@ -68,9 +70,11 @@
   }
 
   const errorCache = new Set();
-  const loadedImagesCache = new Map();
-  let entryFinalUrlCache = new WeakMap();
-  let entryDecisionCache = new WeakMap();
+  const loadedImagesCache = new Map();   // cacheKey -> { src, timestamp }
+  const entryFinalUrlCache = new WeakMap();
+  const entryDecisionCache = new WeakMap();
+  // ★ 新增：entry 级“已加载成功”持久化，抗组件卸载重挂
+  const entryLoadedCache = new WeakMap(); // entry -> finalSrc
 
   function normalizeUrlForKey(url) {
     try {
@@ -200,6 +204,10 @@
     decision.triedUrls.add(normalizedUrl);
     decision.currentIndex++;
     entryFinalUrlCache.delete(entry);
+    // 失败的 URL 作废 entry 级已加载缓存，避免指向坏地址
+    if (entryLoadedCache.has(entry)) {
+      entryLoadedCache.delete(entry);
+    }
 
     if (pluginConfig.enableGraftMode && decision.currentIndex >= decision.allUrls.length) {
       decision.triedUrls.clear();
@@ -235,15 +243,100 @@
     });
   }
 
+  // ============================================================
+  // 视口标记：给 img 加 in-view / 移除，替代“全量 suspend”
+  // ============================================================
+  let viewportObserver = null;
+  const observedImgs = new WeakSet();
+
+  function ensureViewportObserver() {
+    if (viewportObserver) return viewportObserver;
+    if (typeof IntersectionObserver === 'undefined') return null;
+
+    viewportObserver = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const img = e.target;
+        if (!(img instanceof HTMLElement)) continue;
+        if (e.isIntersecting) {
+          img.classList.add('in-view');
+          // ★ 回到视口：如果之前被 suspend 剥掉了 src，尝试恢复
+          restoreSuspendedSrc(img);
+        } else {
+          img.classList.remove('in-view');
+        }
+      }
+    }, {
+      root: null,
+      rootMargin: '200px 0px', // 预取余量，减少上下滚动时反复“出/入”
+      threshold: 0.01
+    });
+
+    return viewportObserver;
+  }
+
+  function observeImg(el) {
+    const obs = ensureViewportObserver();
+    if (!obs || !el || observedImgs.has(el)) return;
+    try {
+      obs.observe(el);
+      observedImgs.add(el);
+    } catch (e) {}
+  }
+
+  function unobserveImg(el) {
+    if (!viewportObserver || !el) return;
+    try {
+      viewportObserver.unobserve(el);
+    } catch (e) {}
+    observedImgs.delete(el);
+  }
+
+  // ★ 核心修复：只有真正把 src 还回去，才删除 suspendedSrc
+  function restoreSuspendedSrc(img) {
+    if (!img || !img.dataset) return;
+    const savedSrc = img.dataset.suspendedSrc;
+    if (!savedSrc) return;
+
+    // 如果滚动层仍挂起或 fileShow 仍挂起，先不动
+    if (img.classList.contains('scroll-suspended')) return;
+    if (isFileShowMode() && img.classList.contains('thumbnail-suspended')) {
+      // fileShow 模式下保持挂起，等 resume 时再恢复
+      return;
+    }
+
+    // 已经是这个 src 了，直接清理标记
+    if (img.getAttribute('src') === savedSrc) {
+      delete img.dataset.suspendedSrc;
+      img.classList.remove('thumbnail-suspended');
+      return;
+    }
+
+    try {
+      img.setAttribute('src', savedSrc);
+      // 只有 setAttribute 成功后才删除
+      delete img.dataset.suspendedSrc;
+      img.classList.remove('thumbnail-suspended');
+    } catch (e) {}
+  }
+
+  // ============================================================
+  // suspend / resume：现在只操作“非视口内”的图
+  // ============================================================
   function suspendThumbnails() {
     try {
       const imgs = document.querySelectorAll('img.thumbnail.passthrough');
       for (const img of imgs) {
+        // ★ 只挂起不在视口内的；视口内保留，避免已加载的 GIF 被剥掉
+        if (img.classList.contains('in-view')) continue;
+        // 已经是挂起状态的不重复处理
+        if (img.classList.contains('thumbnail-suspended') && !img.getAttribute('src')) continue;
+
         const currentSrc = img.getAttribute('src');
         if (currentSrc) {
           img.dataset.suspendedSrc = currentSrc;
           img.removeAttribute('src');
         } else if (!img.dataset.suspendedSrc) {
+          // 没有 src 也没有备份，说明本来就是空的，跳过
           continue;
         }
         img.classList.add('thumbnail-suspended');
@@ -255,13 +348,16 @@
     try {
       const imgs = document.querySelectorAll('img.thumbnail.passthrough');
       for (const img of imgs) {
-        const savedSrc = img.dataset.suspendedSrc;
-        // ★ 改动2：如果滚动层仍挂起，不恢复 src
-        if (savedSrc && !img.classList.contains('scroll-suspended')) {
-          img.setAttribute('src', savedSrc);
+        // 视口内的优先恢复；非视口内的交给 IntersectionObserver / 下次滚动
+        if (img.classList.contains('in-view')) {
+          restoreSuspendedSrc(img);
+        } else if (img.dataset.suspendedSrc) {
+          // 非视口内：仅当滚动层不再挂起时才恢复，否则保留备份等待
+          if (!img.classList.contains('scroll-suspended')) {
+            restoreSuspendedSrc(img);
+          }
+          // 注意：restoreSuspendedSrc 内部已保证“成功 setAttribute 才删除备份”
         }
-        delete img.dataset.suspendedSrc;
-        img.classList.remove('thumbnail-suspended');
       }
     } catch (e) {}
 
@@ -269,6 +365,31 @@
     window.__resumeRetryTimer = setTimeout(() => {
       triggerGlobalRetry();
     }, 150);
+  }
+
+  // 监听 scroll-suspended 类移除，补一次恢复（解决“类被移除但没人恢复 src”）
+  function setupScrollSuspendObserver() {
+    if (document.body.__scrollSuspendObserver) return;
+    document.body.__scrollSuspendObserver = true;
+
+    const obs = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type !== 'attributes' || m.attributeName !== 'class') continue;
+        const el = m.target;
+        if (!(el instanceof HTMLElement)) continue;
+        if (!el.classList.contains('thumbnail')) continue;
+        // scroll-suspended 被移除 -> 尝试恢复
+        if (!el.classList.contains('scroll-suspended')) {
+          restoreSuspendedSrc(el);
+        }
+      }
+    });
+
+    obs.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['class'],
+      subtree: true
+    });
   }
 
   let heartbeatTimer = null;
@@ -341,7 +462,9 @@
   function initializeSystem() {
     injectSuspendStyles();
     setTimeout(setupViewModeObserver, 500);
+    setupScrollSuspendObserver();
     startFileShowHeartbeat();
+    ensureViewportObserver();
 
     const observer = new MutationObserver(() => {
       if (document.querySelector('.dialog-title')?.textContent?.includes('Options')) {
@@ -396,13 +519,13 @@
     }, [localSrc]);
 
     const isGifCover = isCoverGif(entry);
-    const lazyLoading = pluginConfig.lazyLoading !== false && isGifCover;
+    // ★ GIF 不再用原生 lazy，改由自定义 IntersectionObserver + suspend 控制
+    const lazyLoading = false;
 
     const imageType = HFS.React.useMemo(() => {
       if (isNativeGifFile(entry)) {
         return 'native-gif';
       }
-      const ext = entry.ext?.toLowerCase();
       const url = getCurrentCoverUrlSync(entry);
       if (url && url.toLowerCase().endsWith('.gif')) {
         return 'cover-gif';
@@ -414,20 +537,25 @@
     HFS.React.useEffect(() => {
       return () => {
         mountedRef.current = false;
+        if (imgRef.current) unobserveImg(imgRef.current);
       };
     }, []);
 
+    // ★ 全局 retry：只有 err === true 的实例才真正重置，避免批量重载
     HFS.React.useEffect(() => {
       const fn = () => {
         if (!mountedRef.current) return;
+        // 已成功加载的，一律不参与全局重试
         if (loadedRef.current && localSrcRef.current) return;
+        // 只有真正失败的才重试
+        if (!err) return;
         setErr(false);
         setLoaded(false);
         setRetryKey(prev => prev + 1);
       };
       globalRetryListeners.add(fn);
       return () => globalRetryListeners.delete(fn);
-    }, []);
+    }, [err]);
 
     HFS.React.useEffect(() => {
       if (imageType === 'native-gif') {
@@ -435,8 +563,24 @@
         return;
       }
 
+      // ★ entry 级已加载缓存：卸载重挂后直接复用，不再请求
+      if (entryLoadedCache.has(entry)) {
+        const cachedSrc = entryLoadedCache.get(entry);
+        if (cachedSrc) {
+          setLocalSrc(cachedSrc);
+          setErr(false);
+          setLoaded(true);
+          return;
+        }
+      }
+
       const url = getCurrentCoverUrlSync(entry);
       if (url) {
+        // ★ 若 localSrc 已经是这个 url，不重复 set，避免无谓的 effect 触发
+        if (localSrcRef.current === url) {
+          setErr(false);
+          return;
+        }
         setLocalSrc(url);
         setErr(false);
       } else {
@@ -444,11 +588,15 @@
       }
     }, [entry, retryKey, imageType]);
 
+    // ★ 挂载后开始视口观察
+    HFS.React.useEffect(() => {
+      if (imgRef.current) observeImg(imgRef.current);
+    });
+
     const handleLoad = async (e) => {
       if (!mountedRef.current) return;
       try {
         const el = e.target;
-        // ★ 改动3：同时忽略滚动中断与 fileShow 挂起
         if (el.classList.contains('thumbnail-suspended') ||
             el.classList.contains('scroll-suspended')) return;
         delete el.dataset.suspendedSrc;
@@ -457,6 +605,10 @@
           if (mountedRef.current) {
             setLoaded(true);
             el.classList.add('loaded');
+            // ★ 持久化到 entry 级缓存，抗卸载重挂
+            if (localSrcRef.current) {
+              entryLoadedCache.set(entry, localSrcRef.current);
+            }
             const cacheKey = getImageCacheKey(el);
             if (cacheKey) {
               loadedImagesCache.set(cacheKey, {
@@ -469,7 +621,6 @@
       } catch (error) {}
     };
 
-    // ★ 改动1：忽略滚动中断 / fileShow 挂起导致的 error
     const handleError = (e) => {
       if (!mountedRef.current) return;
       if (e?.target?.classList?.contains('scroll-suspended') ||
@@ -492,6 +643,8 @@
       } catch (error) {}
     };
 
+    // ★ 命中 entry 级缓存时直接显示已加载态，跳过 loading 空窗
+    const cachedLoadedSrc = entryLoadedCache.get(entry);
     if (err || !localSrc) {
       return fallback && h(fallback);
     }
@@ -501,9 +654,10 @@
       src: localSrc,
       ref: (el) => {
         imgRef.current = el;
+        if (el) observeImg(el);
         if (props.ref) props.ref(el);
       },
-      className: `${props.className || ''} thumbnail passthrough ${loaded ? 'loaded' : 'loading'} ${imageType}`,
+      className: `${props.className || ''} thumbnail passthrough ${loaded || cachedLoadedSrc ? 'loaded' : 'loading'} ${imageType}`,
       onLoad: handleLoad,
       onError: handleError,
       loading: lazyLoading ? 'lazy' : 'eager',
@@ -566,15 +720,12 @@
       return h('span', props);
     }
 
-    const isGifCover = isCoverGif(entry);
-    const lazyLoading = pluginConfig.lazyLoading !== false && isGifCover;
-
     return h(ImgFallback, {
       fallback: fallbackSpan,
       props: {
         ...props,
         className: `${props.className} thumbnail passthrough`,
-        loading: lazyLoading ? 'lazy' : 'eager',
+        loading: 'eager',
         decoding: 'async',
       },
       entry: entry,
