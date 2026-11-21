@@ -1,5 +1,5 @@
 exports.repo = "Hug3O/MVfiles-covers"
-exports.version = 7.1
+exports.version = 7.3
 exports.description = "Complete media cover/thumbnail extraction and display system - supports video GIF/JPG thumbnails and audio cover extraction"
 exports.apiRequired = 12.91
 exports.frontend_js = 'main.js'
@@ -49,15 +49,6 @@ exports.config = {
     frontend: true,
     label: 'Lazy Loading for GIFs',
     helperText: 'Enable lazy loading for GIF thumbnails (reduces initial page load)',
-    xs: 6
-  },
-  pauseInListMode: {
-    showIf: values => values.config_tab === 'display',
-    type: 'boolean',
-    defaultValue: true,
-    frontend: true,
-    label: 'Pause in List Mode',
-    helperText: 'When enabled, covers will be hidden in list mode (shows only in tiles mode). Disable to show covers in all modes.',
     xs: 6
   },
 
@@ -272,7 +263,15 @@ exports.config = {
     type: 'boolean',
     defaultValue: false,
     label: 'Debug Mode',
-    helperText: 'Enable FFmpeg debug logging',
+    helperText: 'Enable FFmpeg and thumbnail cleanup debug logging',
+    xs: 6
+  },
+  cleanupEnabled: {
+    showIf: values => values.config_tab === 'system',
+    type: 'boolean',
+    defaultValue: true,
+    label: 'Auto-clean orphan thumbnails',
+    helperText: 'Remove thumbnails and covers whose media file no longer exists. Runs when a folder is listed and right after a file is deleted (built-in safety: only files older than 60 minutes, at most one check every 10 minutes per folder).',
     xs: 6
   }
 }
@@ -280,6 +279,7 @@ exports.config = {
 exports.configDialog = { maxWidth: '55em' }
 
 exports.changelog = [
+  { version: 7.2, message: "Added 'Auto-clean orphan thumbnails' switch in the System tab, with built-in safety limits. Pause-in-list-mode is now always active and no longer configurable." },
   { version: 6.4, message: "Added pauseInListMode option - hides covers in list mode" },
   { version: 6.3, message: "Added lazyLoading option for GIF thumbnails" },
   { version: 6.0, message: "Merged thumbnail extraction system - complete media cover/thumbnail solution" },
@@ -695,6 +695,296 @@ exports.init = api => {
   const SUPPORTED_VIDEO_EXTS = ['webm', 'avi', 'mkv', 'mp4', 'mov', 'mpg', 'wmv', 'ts', 'rmvb', 'rm', 'dat', 'vob', 'flv', 'm4v', '3gp', 'mpeg']
   const SUPPORTED_AUDIO_EXTS = ['mp3', 'flac', 'm4a', 'ogg', 'opus', 'wma', 'aiff', 'aif', 'alac', 'dsd', 'dsf', 'dff', 'ape', 'wav', 'aac']
 
+  // ================ Orphan Thumbnail Cleanup ================
+  // A thumbnail is an orphan when the cache folder contains <name>.gif|jpg
+  // but the folder itself has no media file with the same base name.
+  const VIDEO_FILE_EXTS = SUPPORTED_VIDEO_EXTS.concat('divx')
+  const AUDIO_FILE_EXTS = SUPPORTED_AUDIO_EXTS
+  const CLEANUP_TARGETS = [
+    { kind: 'video', subDir: VIDEO_THUMBNAIL_DIR, exts: ['.gif', '.jpg'] },
+    { kind: 'audio', subDir: COVERS_DIR, exts: ['.jpg'] }
+  ]
+  const TEMP_FILE_MAX_AGE_MS = 10 * 60 * 1000
+  const CLEANUP_COOLDOWN_MS = 10 * 60 * 1000
+  const CLEANUP_MIN_AGE_MS = 60 * 60 * 1000
+  const CLEANUP_QUEUE_MAX = 200
+
+  function cleanupEnabled() { return api.getConfig('cleanupEnabled') !== false }
+
+  const lastFolderScan = new Map()
+  const folderScanQueue = new Set()
+  let folderScanRunning = false
+  let cleanupDisposed = false
+
+  function mediaBaseName(name) {
+    const dot = name.lastIndexOf('.')
+    return dot > 0 ? name.slice(0, dot) : ''
+  }
+
+  function mediaExtName(name) {
+    const dot = name.lastIndexOf('.')
+    return dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+  }
+
+  async function removeFileQuiet(target) {
+    try {
+      const stats = await fsp.stat(target)
+      await fsp.unlink(target)
+      return { deleted: 1, size: stats.size || 0 }
+    } catch (e) {
+      if (e.code !== 'ENOENT')
+        debugLog(`[Cleanup] Cannot remove ${target}: ${e.message}`)
+      return { deleted: 0, size: 0 }
+    }
+  }
+
+  // Check and clean a single folder (non recursive: every folder has its own cache).
+  async function reconcileFolder(folder) {
+    const report = { deleted: 0, freedBytes: 0, skipped: '' }
+    if (!cleanupEnabled()) {
+      report.skipped = 'disabled'
+      return report
+    }
+    if (!folder) {
+      report.skipped = 'no-folder'
+      return report
+    }
+
+    const last = lastFolderScan.get(folder)
+    if (last && Date.now() - last < CLEANUP_COOLDOWN_MS) {
+      report.skipped = 'cooldown'
+      return report
+    }
+    lastFolderScan.set(folder, Date.now())
+    if (lastFolderScan.size > 500) {
+      const cutoff = Date.now() - 24 * 3600 * 1000
+      for (const [k, v] of lastFolderScan)
+        if (v < cutoff) lastFolderScan.delete(k)
+    }
+
+    let entries
+    try {
+      entries = await fsp.readdir(folder, { withFileTypes: true })
+    } catch (e) {
+      report.skipped = 'unreadable'
+      debugLog(`[Cleanup] Cannot read ${folder}: ${e.message}`)
+      return report
+    }
+    if (!entries.length) {
+      // An empty folder more likely means an unavailable mount than "everything was deleted":
+      // never mass-delete in that case.
+      report.skipped = 'empty-folder'
+      return report
+    }
+
+    const media = { video: new Set(), audio: new Set() }
+    for (const entry of entries) {
+      if (entry.isDirectory?.() === true) continue
+      const name = entry.name
+      const ext = mediaExtName(name)
+      const base = mediaBaseName(name)
+      if (!base || !ext) continue
+      if (VIDEO_FILE_EXTS.includes(ext)) media.video.add(base.toLowerCase())
+      else if (AUDIO_FILE_EXTS.includes(ext)) media.audio.add(base.toLowerCase())
+    }
+
+    for (const target of CLEANUP_TARGETS) {
+      if (cleanupDisposed) break
+      if (!cleanupEnabled()) break
+
+      const cachePath = join(folder, CACHE_DIR, target.subDir)
+      let cacheEntries
+      try {
+        cacheEntries = await fsp.readdir(cachePath, { withFileTypes: true })
+      } catch (e) {
+        if (e.code !== 'ENOENT')
+          debugLog(`[Cleanup] Cannot read ${cachePath}: ${e.message}`)
+        continue
+      }
+
+      for (const entry of cacheEntries) {
+        if (cleanupDisposed) break
+        if (entry.isDirectory?.() === true) continue
+        const name = entry.name
+        if (!name) continue
+        const lower = name.toLowerCase()
+        const fullPath = join(cachePath, name)
+
+        let stats
+        try {
+          stats = await fsp.stat(fullPath)
+        } catch { continue }
+
+        const age = Date.now() - stats.mtimeMs
+        const isTemp = lower.startsWith(TEMP_PREFIX) || lower.endsWith('_palette.png')
+        if (isTemp) {
+          // Leftovers of an interrupted extraction. Never touch recent ones.
+          if (age < TEMP_FILE_MAX_AGE_MS) continue
+          const res = await removeFileQuiet(fullPath)
+          if (res.deleted) {
+            report.deleted++
+            report.freedBytes += res.size
+            debugLog(`[Cleanup] Removed stale temporary file: ${fullPath}`)
+          }
+          continue
+        }
+
+        const ext = mediaExtName(name)
+        if (!ext || !target.exts.includes('.' + ext)) continue
+        const base = mediaBaseName(name)
+        if (!base) continue
+        if (media[target.kind].has(base.toLowerCase())) continue
+        // Give freshly created thumbnails some time: the media may still be
+        // appearing (copy in progress) or a rename may be in flight.
+        if (age < CLEANUP_MIN_AGE_MS) continue
+
+        const res = await removeFileQuiet(fullPath)
+        if (res.deleted) {
+          report.deleted++
+          report.freedBytes += res.size
+          debugLog(`[Cleanup] Removed orphan: ${fullPath}`)
+        }
+      }
+    }
+    return report
+  }
+
+  // Called from the listDiskFolder event: cheap pre-check, then queue in background.
+  function queueFolderCleanup(folder) {
+    if (cleanupDisposed || !cleanupEnabled()) return
+    if (!folder || folderScanQueue.has(folder)) return
+    if (folderScanQueue.size >= CLEANUP_QUEUE_MAX) return
+    try {
+      if (!fs.existsSync(join(folder, CACHE_DIR))) return
+    } catch { return }
+    folderScanQueue.add(folder)
+    runCleanupQueue()
+  }
+
+  async function runCleanupQueue() {
+    if (folderScanRunning || cleanupDisposed) return
+    folderScanRunning = true
+    let deleted = 0
+    let freed = 0
+    let scanned = 0
+    try {
+      while (folderScanQueue.size && !cleanupDisposed) {
+        if (!cleanupEnabled()) {
+          folderScanQueue.clear()
+          break
+        }
+        const folder = folderScanQueue.values().next().value
+        folderScanQueue.delete(folder)
+        try {
+          const report = await reconcileFolder(folder)
+          if (!report.skipped) {
+            scanned++
+            deleted += report.deleted
+            freed += report.freedBytes
+          }
+        } catch (e) {
+          debugLog(`[Cleanup] Folder failed ${folder}: ${e && e.message}`)
+        }
+        await new Promise(r => setImmediate(r))
+      }
+    } finally {
+      folderScanRunning = false
+      if (deleted)
+        debugLog(`[Cleanup] Removed ${deleted} orphan thumbnail(s), ${(freed / 1048576).toFixed(2)} MB, in ${scanned} folder(s)`)
+      if (folderScanQueue.size && !cleanupDisposed)
+        runCleanupQueue()
+    }
+  }
+
+  // Delete the thumbnail(s) of one deleted media file. Waits until the media is
+  // really gone, and refuses to act if another file with the same base name
+  // (e.g. a.mp4 + a.mkv) is still present.
+  async function removeThumbsForMediaFile(filePath) {
+    const result = { deleted: 0, freedBytes: 0 }
+    const folder = dirname(filePath)
+    const ext = getFileExtension(filePath)
+    const base = stripExt(basename(filePath))
+    if (!base) return result
+    const kind = VIDEO_FILE_EXTS.includes(ext) ? 'video'
+      : AUDIO_FILE_EXTS.includes(ext) ? 'audio'
+        : ''
+    if (!kind) return result
+    const mediaExts = kind === 'video' ? VIDEO_FILE_EXTS : AUDIO_FILE_EXTS
+    const baseLower = base.toLowerCase()
+
+    let stillHasMedia = false
+    try {
+      for (const entry of await fsp.readdir(folder, { withFileTypes: true })) {
+        if (entry.isDirectory?.() === true) continue
+        const name = entry.name
+        if (mediaBaseName(name).toLowerCase() !== baseLower) continue
+        if (mediaExts.includes(mediaExtName(name))) {
+          stillHasMedia = true
+          break
+        }
+      }
+    } catch (e) {
+      debugLog(`[Cleanup] Cannot inspect ${folder}: ${e.message}`)
+      return result
+    }
+    if (stillHasMedia) return result
+
+    const targets = kind === 'video'
+      ? [
+          join(folder, CACHE_DIR, VIDEO_THUMBNAIL_DIR, base + '.gif'),
+          join(folder, CACHE_DIR, VIDEO_THUMBNAIL_DIR, base + '.jpg'),
+          join(folder, CACHE_DIR, VIDEO_THUMBNAIL_DIR, base + '_palette.png')
+        ]
+      : [join(folder, CACHE_DIR, COVERS_DIR, base + '.jpg')]
+
+    for (const target of targets) {
+      const res = await removeFileQuiet(target)
+      result.deleted += res.deleted
+      result.freedBytes += res.size
+    }
+    return result
+  }
+
+  function schedulePostDeleteCleanup(filePath) {
+    let attempts = 0
+    const check = async () => {
+      if (cleanupDisposed || !cleanupEnabled()) return
+      attempts++
+      // HFS emits "deleting" before removing the file: wait for the removal.
+      const exists = await fsp.access(filePath).then(() => true, () => false)
+      if (exists) {
+        if (attempts < 3) api.setTimeout(check, 1500)
+        return
+      }
+      try {
+        const res = await removeThumbsForMediaFile(filePath)
+        if (res.deleted)
+          debugLog(`[Cleanup] Removed ${res.deleted} thumbnail(s) of deleted file: ${basename(filePath)}`)
+      } catch (e) {
+        debugLog(`[Cleanup] Post-delete cleanup failed: ${e && e.message}`)
+      }
+    }
+    api.setTimeout(check, 1200)
+  }
+
+  // Register the two triggers.
+  // listDiskFolder is fired by HFS whenever a folder is read from disk, which
+  // includes every get_file_list request.
+  api.events.on('listDiskFolder', ({ path: folder }) => {
+    if (!folder) return
+    queueFolderCleanup(folder)
+  })
+
+  api.events.on('deleting', ({ node }) => {
+    if (cleanupDisposed || !cleanupEnabled()) return
+    if (node?.isFolder) return // rm -r takes the cache folder with it
+    const source = node?.source
+    if (!source) return
+    const ext = getFileExtension(source)
+    if (!VIDEO_FILE_EXTS.includes(ext) && !AUDIO_FILE_EXTS.includes(ext)) return
+    schedulePostDeleteCleanup(source)
+  })
+
   // ================ Thumbnail Extraction Main Function ================
   const thumbnailQueue = new ThumbnailQueue()
   const pendingTasks = new Map()
@@ -890,6 +1180,8 @@ exports.init = api => {
   // ================ Export API ================
   return {
     unload() {
+      cleanupDisposed = true
+      folderScanQueue.clear()
       thumbnailQueue.clear()
       for (const [key, value] of pendingTasks) {
         if (key.endsWith('_timer')) {

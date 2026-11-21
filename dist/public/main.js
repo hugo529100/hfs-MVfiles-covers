@@ -54,10 +54,8 @@
   };
 
   const isPluginActive = () => {
-    if (pluginConfig.pauseInListMode !== false && isListMode()) {
-      return false;
-    }
-    return true;
+    // Pause in list mode is always active.
+    return !isListMode();
   };
 
   const debugMode = false;
