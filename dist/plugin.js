@@ -1,5 +1,5 @@
 exports.repo = "Hug3O/MVfiles-covers"
-exports.version = 7.3
+exports.version = 7.5
 exports.description = "Complete media cover/thumbnail extraction and display system - supports video GIF/JPG thumbnails and audio cover extraction"
 exports.apiRequired = 12.91
 exports.frontend_js = 'main.js'
@@ -61,7 +61,7 @@ exports.config = {
     defaultValue: false,
     frontend: true,
     label: 'Enable Single-Path Graft Mode',
-    helperText: 'When enabled, all cover paths will be redirected to the specified path below'
+    helperText: 'When enabled, covers are also mirrored to the graft path below, keeping the original folder hierarchy'
   },
   graftPath: {
     showIf: values => values.config_tab === 'graft' && values.enableGraftMode,
@@ -72,7 +72,7 @@ exports.config = {
     multiple: false,
     frontend: true,
     defaultValue: '/images/cache',
-    helperText: 'Unified storage path for all media covers'
+    helperText: 'Unified storage path for all media covers. The full folder hierarchy is preserved below this path'
   },
   graftVideoCovers: {
     showIf: values => values.config_tab === 'graft' && values.enableGraftMode,
@@ -80,7 +80,7 @@ exports.config = {
     defaultValue: true,
     frontend: true,
     label: 'Graft Video Covers',
-    helperText: 'When enabled, video thumbnails will be stored in the graft path'
+    helperText: 'When enabled, video thumbnails are mirrored to the graft path'
   },
   graftMusicCovers: {
     showIf: values => values.config_tab === 'graft' && values.enableGraftMode,
@@ -88,7 +88,7 @@ exports.config = {
     defaultValue: true,
     frontend: true,
     label: 'Graft Music Covers',
-    helperText: 'When enabled, music covers will be stored in the graft path'
+    helperText: 'When enabled, music covers are mirrored to the graft path'
   },
 
   // ============================================
@@ -279,6 +279,8 @@ exports.config = {
 exports.configDialog = { maxWidth: '55em' }
 
 exports.changelog = [
+  { version: 7.5, message: "Switching graft mode on midway now migrates existing covers automatically: a missing graft cover is materialized from the original cache the first time it is requested" },
+  { version: 7.4, message: "Graft mode now mirrors thumbnails/covers into the graft path with the full folder hierarchy, removes them together with deleted videos/folders, and cleans orphan mirror files" },
   { version: 7.2, message: "Added 'Auto-clean orphan thumbnails' switch in the System tab, with built-in safety limits. Pause-in-list-mode is now always active and no longer configurable." },
   { version: 6.4, message: "Added pauseInListMode option - hides covers in list mode" },
   { version: 6.3, message: "Added lazyLoading option for GIF thumbnails" },
@@ -290,7 +292,7 @@ exports.changelog = [
 
 // ================ Backend Main Logic ================
 exports.init = api => {
-  const { join, basename, dirname } = api.require('path')
+  const { join, basename, dirname, resolve, relative, isAbsolute } = api.require('path')
   const fs = api.require('fs')
   const fsp = fs.promises
   const { spawn } = api.require('child_process')
@@ -695,6 +697,413 @@ exports.init = api => {
   const SUPPORTED_VIDEO_EXTS = ['webm', 'avi', 'mkv', 'mp4', 'mov', 'mpg', 'wmv', 'ts', 'rmvb', 'rm', 'dat', 'vob', 'flv', 'm4v', '3gp', 'mpeg']
   const SUPPORTED_AUDIO_EXTS = ['mp3', 'flac', 'm4a', 'ogg', 'opus', 'wma', 'aiff', 'aif', 'alac', 'dsd', 'dsf', 'dff', 'ape', 'wav', 'aac']
 
+  // ================ Graft Mode Mirrors ================
+  // graftPath is a VFS path (e.g. /images/cache). Mirrors keep the media folder
+  // hierarchy below it, matching the URLs built by the frontend:
+  //   <graftPath><folder-uri>cache/videothumbnail/<name>.gif
+  function graftEnabled() { return api.getConfig('enableGraftMode') === true }
+  function graftVideoEnabled() { return api.getConfig('graftVideoCovers') !== false }
+  function graftMusicEnabled() { return api.getConfig('graftMusicCovers') !== false }
+  function graftVfsPath() { return String(api.getConfig('graftPath') || '/images/cache').trim() }
+
+  const folderVfsMap = new Map()      // disk folder key -> decoded VFS folder
+  const vfsFolderDiskMap = new Map()  // decoded VFS folder -> disk folder
+  let mountsCache = null
+  let graftRootCache = { at: 0, path: '' }
+  const graftMirrorQueue = []
+  const graftMirrorQueued = new Set()
+  let graftMirrorRunning = false
+
+  function stripFinalSep(path) {
+    if (/^[A-Za-z]:[\\/]$/.test(path) || path === '/' || path === '\\') return path
+    return path.replace(/[\\/]+$/, '')
+  }
+
+  function folderKey(folder) {
+    const path = stripFinalSep(resolve(folder))
+    return process.platform === 'win32' ? path.toLowerCase() : path
+  }
+
+  function isInsideFolder(parent, child) {
+    const rel = relative(resolve(parent), resolve(child))
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+  }
+
+  function decodeVfsSegment(segment) {
+    try { return decodeURIComponent(segment) }
+    catch { return segment }
+  }
+
+  // Returns null when the path contains unsafe segments.
+  function vfsSegments(vfsFolder) {
+    if (!vfsFolder) return null
+    const segments = String(vfsFolder).replace(/\\/g, '/').split('/').filter(Boolean).map(decodeVfsSegment)
+    const safe = []
+    for (const segment of segments) {
+      if (segment === '.' || segment === '..' || segment.includes('/') || segment.includes('\\')) return null
+      safe.push(segment)
+    }
+    return safe
+  }
+
+  function normalizeVfsFolder(vfsFolder) {
+    const segments = vfsSegments(vfsFolder)
+    return segments && segments.length ? '/' + segments.join('/') + '/' : ''
+  }
+
+  // Same safety checks as vfsSegments, but for values that are already decoded
+  // (folderVfsMap and mount-derived paths), to avoid decoding them twice.
+  function decodedSegments(vfsFolder) {
+    if (!vfsFolder) return null
+    const segments = String(vfsFolder).replace(/\\/g, '/').split('/').filter(Boolean)
+    const safe = []
+    for (const segment of segments) {
+      if (segment === '.' || segment === '..' || segment.includes('/') || segment.includes('\\')) return null
+      safe.push(segment)
+    }
+    return safe
+  }
+
+  function vfsDirname(vfsPath) {
+    if (!vfsPath) return ''
+    const path = String(vfsPath).replace(/\\/g, '/')
+    const index = path.lastIndexOf('/')
+    return index > 0 ? path.slice(0, index + 1) : ''
+  }
+
+  function rememberFolderVfs(folder, vfsFolder) {
+    if (!folder || !vfsFolder) return
+    const normalized = normalizeVfsFolder(vfsFolder)
+    if (!normalized) return
+    folderVfsMap.set(folderKey(folder), normalized)
+    vfsFolderDiskMap.set(normalized, stripFinalSep(resolve(folder)))
+    if (folderVfsMap.size > 5000) {
+      for (const key of folderVfsMap.keys()) {
+        const vfs = folderVfsMap.get(key)
+        folderVfsMap.delete(key)
+        if (vfs) vfsFolderDiskMap.delete(vfs)
+        if (folderVfsMap.size <= 4000) break
+      }
+    }
+  }
+
+  function getMounts() {
+    if (mountsCache) return mountsCache
+    const mounts = []
+    try {
+      const root = api.getHfsConfig('vfs')
+      ;(function walk(node, base) {
+        for (const child of (node && node.children) || []) {
+          if (!child || typeof child !== 'object') continue
+          const source = typeof child.source === 'string' ? child.source : ''
+          const name = child.name || (source ? basename(stripFinalSep(resolve(source))) : '')
+          if (!name) continue
+          const vfs = (base || '') + '/' + name
+          if (source) mounts.push({ source: stripFinalSep(resolve(source)), vfs })
+          walk(child, vfs)
+        }
+      })(root, '')
+    } catch (e) {
+      debugLog(`[Graft] Cannot read VFS: ${e.message}`)
+    }
+    mounts.sort((a, b) => b.source.length - a.source.length)
+    mountsCache = mounts
+    return mounts
+  }
+
+  function folderVfsFromMounts(folder) {
+    const target = resolve(folder)
+    for (const mount of getMounts()) {
+      const rel = relative(resolve(mount.source), target)
+      if (rel && (rel.startsWith('..') || isAbsolute(rel))) continue
+      const segments = rel.split(/[\\/]/).filter(Boolean)
+      return normalizeVfsFolder(mount.vfs + (segments.length ? '/' + segments.join('/') : ''))
+    }
+    return ''
+  }
+
+  function folderVfsFor(folder) {
+    if (!folder) return ''
+    return folderVfsMap.get(folderKey(folder)) || folderVfsFromMounts(folder)
+  }
+
+  // Reverse mapping: VFS folder -> source folder on disk.
+  function diskForVfsFolder(vfsFolder) {
+    const wanted = normalizeVfsFolder(vfsFolder)
+    if (!wanted) return ''
+    const exact = vfsFolderDiskMap.get(wanted)
+    if (exact) return exact
+    const segments = decodedSegments(wanted)
+    if (!segments) return ''
+    const ignoreCase = process.platform === 'win32'
+    const mounts = getMounts()
+      .map(mount => ({ ...mount, segs: decodedSegments(mount.vfs) }))
+      .filter(mount => mount.segs && mount.segs.length)
+      .sort((a, b) => b.segs.length - a.segs.length)
+    for (const mount of mounts) {
+      if (segments.length < mount.segs.length) continue
+      let same = true
+      for (let i = 0; i < mount.segs.length; i++) {
+        const a = ignoreCase ? segments[i].toLowerCase() : segments[i]
+        const b = ignoreCase ? mount.segs[i].toLowerCase() : mount.segs[i]
+        if (a !== b) {
+          same = false
+          break
+        }
+      }
+      if (!same) continue
+      return join(mount.source, ...segments.slice(mount.segs.length))
+    }
+    return ''
+  }
+
+  async function resolveGraftRoot() {
+    const configured = graftVfsPath()
+    if (!configured) return ''
+    const target = configured.startsWith('/') ? configured : '/' + configured
+    try {
+      const { urlToNode } = api.require('./vfs')
+      const node = await urlToNode(target, undefined, undefined, { allowMissing: true })
+      if (node && node.source) return stripFinalSep(resolve(String(node.source)))
+    } catch (e) {
+      debugLog(`[Graft] VFS lookup failed for ${target}: ${e.message}`)
+    }
+    // fallback: find the deepest configured mount containing the graft path
+    const targetFolder = normalizeVfsFolder(target)
+    if (!targetFolder) return ''
+    const mount = getMounts()
+      .filter(x => {
+        const mountFolder = normalizeVfsFolder(x.vfs)
+        return mountFolder && (targetFolder === mountFolder || targetFolder.startsWith(mountFolder))
+      })
+      .sort((a, b) => b.vfs.length - a.vfs.length)[0]
+    if (!mount) return ''
+    const mountFolder = normalizeVfsFolder(mount.vfs)
+    const segments = targetFolder.slice(mountFolder.length).split('/').filter(Boolean)
+    return stripFinalSep(resolve(join(mount.source, ...segments)))
+  }
+
+  async function getGraftRoot() {
+    if (!graftEnabled()) return ''
+    const now = Date.now()
+    if (now - graftRootCache.at < 10000) return graftRootCache.path
+    let path = ''
+    try { path = await resolveGraftRoot() }
+    catch (e) { debugLog(`[Graft] Cannot resolve graft root: ${e.message}`) }
+    graftRootCache = { at: now, path }
+    if (!path) debugLog(`[Graft] Graft path not resolvable: ${graftVfsPath()}`)
+    return path
+  }
+
+  // A graft cover can be requested before any listing mirrored it (e.g. graft
+  // mode switched on midway). Materialize it from the original cache on demand.
+  async function materializeGraftFromLocal(requestPath) {
+    if (!graftEnabled()) return false
+    const requestSegments = vfsSegments(requestPath)
+    const graftSegments = vfsSegments(graftVfsPath())
+    if (!requestSegments || !graftSegments || requestSegments.length <= graftSegments.length) return false
+    const ignoreCase = process.platform === 'win32'
+    for (let i = 0; i < graftSegments.length; i++) {
+      const a = ignoreCase ? requestSegments[i].toLowerCase() : requestSegments[i]
+      const b = ignoreCase ? graftSegments[i].toLowerCase() : graftSegments[i]
+      if (a !== b) return false
+    }
+    const inner = requestSegments.slice(graftSegments.length)
+    if (inner.length < 4) return false
+    if (inner[inner.length - 3] !== CACHE_DIR) return false
+    const subDir = inner[inner.length - 2]
+    if (subDir !== VIDEO_THUMBNAIL_DIR && subDir !== COVERS_DIR) return false
+    if (subDir === VIDEO_THUMBNAIL_DIR && !graftVideoEnabled()) return false
+    if (subDir === COVERS_DIR && !graftMusicEnabled()) return false
+    const fileName = inner[inner.length - 1]
+    if (!fileName) return false
+    const lower = fileName.toLowerCase()
+    if (lower.startsWith(TEMP_PREFIX) || lower.endsWith('_palette.png')) return false
+    const ext = mediaExtName(fileName)
+    if (subDir === VIDEO_THUMBNAIL_DIR ? !['gif', 'jpg'].includes(ext) : ext !== 'jpg') return false
+
+    const root = await getGraftRoot()
+    if (!root) return false
+    const destination = join(root, ...inner)
+    const rel = relative(root, destination)
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) return false
+    try {
+      await fsp.access(destination)
+      return true // already mirrored
+    } catch {}
+
+    const mediaVfsFolder = '/' + inner.slice(0, -3).join('/') + '/'
+    const sourceFolder = diskForVfsFolder(mediaVfsFolder)
+    if (!sourceFolder) {
+      debugLog(`[Graft] Cannot map mirrored request to a source folder: ${requestPath}`)
+      return false
+    }
+    const localPath = join(sourceFolder, CACHE_DIR, subDir, fileName)
+    if (folderKey(localPath) === folderKey(destination) || !fs.existsSync(localPath)) return false
+    try {
+      await fsp.mkdir(dirname(destination), { recursive: true })
+      await fsp.copyFile(localPath, destination)
+      debugLog(`[Graft] Materialized ${localPath} -> ${destination}`)
+      return true
+    } catch (e) {
+      debugLog(`[Graft] Materialize failed ${localPath}: ${e.message}`)
+      return false
+    }
+  }
+
+  function graftDestination(root, vfsFolder, subDir, fileName) {
+    const segments = decodedSegments(vfsFolder)
+    if (!segments || !segments.length) return ''
+    const destination = join(root, ...segments, CACHE_DIR, subDir, fileName)
+    const rel = relative(root, destination)
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) return ''
+    return destination
+  }
+
+  async function mirrorThumbToGraft(localPath, kind) {
+    if (!graftEnabled()) return false
+    if (kind === 'video' ? !graftVideoEnabled() : !graftMusicEnabled()) return false
+    const mediaFolder = dirname(dirname(dirname(localPath)))
+    const vfsFolder = folderVfsFor(mediaFolder)
+    if (!vfsFolder) {
+      debugLog(`[Graft] Cannot map folder to VFS: ${mediaFolder}`)
+      return false
+    }
+    const root = await getGraftRoot()
+    if (!root) return false
+    const destination = graftDestination(root, vfsFolder,
+      kind === 'video' ? VIDEO_THUMBNAIL_DIR : COVERS_DIR, basename(localPath))
+    if (!destination || folderKey(localPath) === folderKey(destination)) return false
+    try {
+      const localStats = await fsp.stat(localPath)
+      const destStats = await fsp.stat(destination).catch(() => null)
+      if (destStats && destStats.size === localStats.size && destStats.mtimeMs >= localStats.mtimeMs - 1000)
+        return true
+      await fsp.mkdir(dirname(destination), { recursive: true })
+      await fsp.copyFile(localPath, destination)
+      debugLog(`[Graft] Mirrored ${localPath} -> ${destination}`)
+      return true
+    } catch (e) {
+      debugLog(`[Graft] Mirror failed ${localPath}: ${e.message}`)
+      return false
+    }
+  }
+
+  function queueGraftMirror(localPath, kind, safe) {
+    if (!graftEnabled() || cleanupDisposed) return
+    if (graftMirrorQueued.has(localPath)) return
+    if (graftMirrorQueue.length >= 500) return
+    graftMirrorQueued.add(localPath)
+    graftMirrorQueue.push({ localPath, kind, safe })
+    runGraftMirrorQueue()
+  }
+
+  async function runGraftMirrorQueue() {
+    if (graftMirrorRunning || cleanupDisposed) return
+    graftMirrorRunning = true
+    try {
+      while (graftMirrorQueue.length && !cleanupDisposed) {
+        if (!graftEnabled()) {
+          graftMirrorQueue.length = 0
+          break
+        }
+        const job = graftMirrorQueue.shift()
+        graftMirrorQueued.delete(job.localPath)
+        if (job.safe) {
+          try {
+            const stats = await fsp.stat(job.localPath)
+            if (Date.now() - stats.mtimeMs < 5000) continue
+          } catch { continue }
+        }
+        await mirrorThumbToGraft(job.localPath, job.kind)
+      }
+    } finally {
+      graftMirrorRunning = false
+      if (graftMirrorQueue.length && !cleanupDisposed) runGraftMirrorQueue()
+    }
+  }
+
+  function mirrorExistingMediaThumbs(mediaPath, vfsFolder) {
+    if (!graftEnabled()) return
+    const folder = dirname(mediaPath)
+    if (vfsFolder) rememberFolderVfs(folder, vfsFolder)
+    const base = stripExt(basename(mediaPath))
+    if (!base) return
+    if (VIDEO_FILE_EXTS.includes(getFileExtension(mediaPath))) {
+      if (!graftVideoEnabled()) return
+      for (const format of ['gif', 'jpg']) {
+        const localPath = join(folder, CACHE_DIR, VIDEO_THUMBNAIL_DIR, base + '.' + format)
+        if (fs.existsSync(localPath)) queueGraftMirror(localPath, 'video', true)
+      }
+    } else if (graftMusicEnabled()) {
+      const localPath = join(folder, CACHE_DIR, COVERS_DIR, base + '.jpg')
+      if (fs.existsSync(localPath)) queueGraftMirror(localPath, 'audio', true)
+    }
+  }
+
+  async function removeGraftThumbsForMediaFile(filePath, kind, vfsFolder) {
+    if (!graftEnabled()) return { deleted: 0, freedBytes: 0 }
+    const folder = dirname(filePath)
+    const vfs = vfsFolder ? normalizeVfsFolder(vfsFolder) : folderVfsFor(folder)
+    if (!vfs) return { deleted: 0, freedBytes: 0 }
+    const root = await getGraftRoot()
+    if (!root) return { deleted: 0, freedBytes: 0 }
+    const base = stripExt(basename(filePath))
+    const names = kind === 'video'
+      ? [base + '.gif', base + '.jpg', base + '_palette.png']
+      : [base + '.jpg']
+    const result = { deleted: 0, freedBytes: 0 }
+    for (const name of names) {
+      const destination = graftDestination(root, vfs,
+        kind === 'video' ? VIDEO_THUMBNAIL_DIR : COVERS_DIR, name)
+      if (!destination) continue
+      const res = await removeFileQuiet(destination)
+      result.deleted += res.deleted
+      result.freedBytes += res.size
+    }
+    return result
+  }
+
+  function schedulePostDeleteGraftFolder(folderSource, vfsFolder) {
+    let attempts = 0
+    const check = async () => {
+      if (cleanupDisposed || !graftEnabled()) return
+      attempts++
+      const exists = await fsp.access(folderSource).then(() => true, () => false)
+      if (exists) {
+        if (attempts < 3) api.setTimeout(check, 1500)
+        return
+      }
+      try {
+        const root = await getGraftRoot()
+        const segments = vfsSegments(vfsFolder)
+        if (!root || !segments || !segments.length) return
+        for (const subDir of [VIDEO_THUMBNAIL_DIR, COVERS_DIR]) {
+          const destination = join(root, ...segments, CACHE_DIR, subDir)
+          const rel = relative(root, destination)
+          if (!rel || rel.startsWith('..') || isAbsolute(rel)) continue
+          await fsp.rm(destination, { recursive: true, force: true })
+        }
+        // Only removes empty directories, so other mirrors are untouched.
+        await fsp.rmdir(join(root, ...segments, CACHE_DIR)).catch(() => {})
+        await fsp.rmdir(join(root, ...segments)).catch(() => {})
+        debugLog(`[Graft] Removed mirrored folder: ${vfsFolder}`)
+      } catch (e) {
+        debugLog(`[Graft] Folder cleanup failed: ${e.message}`)
+      }
+    }
+    api.setTimeout(check, 1200)
+  }
+
+  // Config/VFS changes can move the graft root: drop the cached resolution.
+  api.subscribeConfig(['enableGraftMode', 'graftPath'], () => {
+    graftRootCache = { at: 0, path: '' }
+  })
+  api.events.on('config.vfs', () => {
+    mountsCache = null
+    graftRootCache = { at: 0, path: '' }
+  })
+
   // ================ Orphan Thumbnail Cleanup ================
   // A thumbnail is an orphan when the cache folder contains <name>.gif|jpg
   // but the folder itself has no media file with the same base name.
@@ -738,6 +1147,62 @@ exports.init = api => {
     }
   }
 
+  async function cleanCacheDir(cachePath, target, media, report) {
+    let cacheEntries
+    try {
+      cacheEntries = await fsp.readdir(cachePath, { withFileTypes: true })
+    } catch (e) {
+      if (e.code !== 'ENOENT')
+        debugLog(`[Cleanup] Cannot read ${cachePath}: ${e.message}`)
+      return
+    }
+
+    for (const entry of cacheEntries) {
+      if (cleanupDisposed) break
+      if (!cleanupEnabled()) break
+      if (entry.isDirectory?.() === true) continue
+      const name = entry.name
+      if (!name) continue
+      const lower = name.toLowerCase()
+      const fullPath = join(cachePath, name)
+
+      let stats
+      try {
+        stats = await fsp.stat(fullPath)
+      } catch { continue }
+
+      const age = Date.now() - stats.mtimeMs
+      const isTemp = lower.startsWith(TEMP_PREFIX) || lower.endsWith('_palette.png')
+      if (isTemp) {
+        // Leftovers of an interrupted extraction. Never touch recent ones.
+        if (age < TEMP_FILE_MAX_AGE_MS) continue
+        const res = await removeFileQuiet(fullPath)
+        if (res.deleted) {
+          report.deleted++
+          report.freedBytes += res.size
+          debugLog(`[Cleanup] Removed stale temporary file: ${fullPath}`)
+        }
+        continue
+      }
+
+      const ext = mediaExtName(name)
+      if (!ext || !target.exts.includes('.' + ext)) continue
+      const base = mediaBaseName(name)
+      if (!base) continue
+      if (media[target.kind].has(base.toLowerCase())) continue
+      // Give freshly created thumbnails some time: the media may still be
+      // appearing (copy in progress) or a rename may be in flight.
+      if (age < CLEANUP_MIN_AGE_MS) continue
+
+      const res = await removeFileQuiet(fullPath)
+      if (res.deleted) {
+        report.deleted++
+        report.freedBytes += res.size
+        debugLog(`[Cleanup] Removed orphan: ${fullPath}`)
+      }
+    }
+  }
+
   // Check and clean a single folder (non recursive: every folder has its own cache).
   async function reconcileFolder(folder) {
     const report = { deleted: 0, freedBytes: 0, skipped: '' }
@@ -748,6 +1213,16 @@ exports.init = api => {
     if (!folder) {
       report.skipped = 'no-folder'
       return report
+    }
+
+    // Never treat the graft storage itself as a media cache: browsing the
+    // mirror tree must not delete the mirrors.
+    if (graftEnabled()) {
+      const root = await getGraftRoot()
+      if (root && isInsideFolder(root, folder)) {
+        report.skipped = 'graft-storage'
+        return report
+      }
     }
 
     const last = lastFolderScan.get(folder)
@@ -789,60 +1264,20 @@ exports.init = api => {
     }
 
     for (const target of CLEANUP_TARGETS) {
-      if (cleanupDisposed) break
       if (!cleanupEnabled()) break
+      await cleanCacheDir(join(folder, CACHE_DIR, target.subDir), target, media, report)
+    }
 
-      const cachePath = join(folder, CACHE_DIR, target.subDir)
-      let cacheEntries
-      try {
-        cacheEntries = await fsp.readdir(cachePath, { withFileTypes: true })
-      } catch (e) {
-        if (e.code !== 'ENOENT')
-          debugLog(`[Cleanup] Cannot read ${cachePath}: ${e.message}`)
-        continue
-      }
-
-      for (const entry of cacheEntries) {
-        if (cleanupDisposed) break
-        if (entry.isDirectory?.() === true) continue
-        const name = entry.name
-        if (!name) continue
-        const lower = name.toLowerCase()
-        const fullPath = join(cachePath, name)
-
-        let stats
-        try {
-          stats = await fsp.stat(fullPath)
-        } catch { continue }
-
-        const age = Date.now() - stats.mtimeMs
-        const isTemp = lower.startsWith(TEMP_PREFIX) || lower.endsWith('_palette.png')
-        if (isTemp) {
-          // Leftovers of an interrupted extraction. Never touch recent ones.
-          if (age < TEMP_FILE_MAX_AGE_MS) continue
-          const res = await removeFileQuiet(fullPath)
-          if (res.deleted) {
-            report.deleted++
-            report.freedBytes += res.size
-            debugLog(`[Cleanup] Removed stale temporary file: ${fullPath}`)
-          }
-          continue
-        }
-
-        const ext = mediaExtName(name)
-        if (!ext || !target.exts.includes('.' + ext)) continue
-        const base = mediaBaseName(name)
-        if (!base) continue
-        if (media[target.kind].has(base.toLowerCase())) continue
-        // Give freshly created thumbnails some time: the media may still be
-        // appearing (copy in progress) or a rename may be in flight.
-        if (age < CLEANUP_MIN_AGE_MS) continue
-
-        const res = await removeFileQuiet(fullPath)
-        if (res.deleted) {
-          report.deleted++
-          report.freedBytes += res.size
-          debugLog(`[Cleanup] Removed orphan: ${fullPath}`)
+    // Clean the mirrored copy as well, when graft mode is active and the
+    // folder can be mapped back to its VFS path.
+    if (graftEnabled() && cleanupEnabled()) {
+      const root = await getGraftRoot()
+      const segments = decodedSegments(folderVfsFor(folder))
+      if (root && segments && segments.length) {
+        for (const target of CLEANUP_TARGETS) {
+          if (target.kind === 'video' && !graftVideoEnabled()) continue
+          if (target.kind === 'audio' && !graftMusicEnabled()) continue
+          await cleanCacheDir(join(root, ...segments, CACHE_DIR, target.subDir), target, media, report)
         }
       }
     }
@@ -854,9 +1289,15 @@ exports.init = api => {
     if (cleanupDisposed || !cleanupEnabled()) return
     if (!folder || folderScanQueue.has(folder)) return
     if (folderScanQueue.size >= CLEANUP_QUEUE_MAX) return
+    let hasCache = false
     try {
-      if (!fs.existsSync(join(folder, CACHE_DIR))) return
+      hasCache = fs.existsSync(join(folder, CACHE_DIR))
     } catch { return }
+    if (!hasCache) {
+      // The local cache may have been wiped while the graft mirror is still
+      // there: allow the pass when the folder maps to a VFS path.
+      if (!graftEnabled() || !folderVfsFor(folder)) return
+    }
     folderScanQueue.add(folder)
     runCleanupQueue()
   }
@@ -899,7 +1340,7 @@ exports.init = api => {
   // Delete the thumbnail(s) of one deleted media file. Waits until the media is
   // really gone, and refuses to act if another file with the same base name
   // (e.g. a.mp4 + a.mkv) is still present.
-  async function removeThumbsForMediaFile(filePath) {
+  async function removeThumbsForMediaFile(filePath, vfsFolder) {
     const result = { deleted: 0, freedBytes: 0 }
     const folder = dirname(filePath)
     const ext = getFileExtension(filePath)
@@ -942,10 +1383,16 @@ exports.init = api => {
       result.deleted += res.deleted
       result.freedBytes += res.size
     }
+
+    if (graftEnabled()) {
+      const graft = await removeGraftThumbsForMediaFile(filePath, kind, vfsFolder)
+      result.deleted += graft.deleted
+      result.freedBytes += graft.freedBytes
+    }
     return result
   }
 
-  function schedulePostDeleteCleanup(filePath) {
+  function schedulePostDeleteCleanup(filePath, vfsFolder) {
     let attempts = 0
     const check = async () => {
       if (cleanupDisposed || !cleanupEnabled()) return
@@ -957,7 +1404,7 @@ exports.init = api => {
         return
       }
       try {
-        const res = await removeThumbsForMediaFile(filePath)
+        const res = await removeThumbsForMediaFile(filePath, vfsFolder)
         if (res.deleted)
           debugLog(`[Cleanup] Removed ${res.deleted} thumbnail(s) of deleted file: ${basename(filePath)}`)
       } catch (e) {
@@ -977,19 +1424,31 @@ exports.init = api => {
 
   api.events.on('deleting', ({ node }) => {
     if (cleanupDisposed || !cleanupEnabled()) return
-    if (node?.isFolder) return // rm -r takes the cache folder with it
     const source = node?.source
     if (!source) return
+
+    if (node?.isFolder) {
+      // rm -r removes the local cache; the graft mirror needs its own cleanup.
+      if (graftEnabled())
+        schedulePostDeleteGraftFolder(source, node?.vfsPath)
+      return
+    }
+
     const ext = getFileExtension(source)
     if (!VIDEO_FILE_EXTS.includes(ext) && !AUDIO_FILE_EXTS.includes(ext)) return
-    schedulePostDeleteCleanup(source)
+
+    const folderVfs = vfsDirname(node?.vfsPath)
+    if (folderVfs)
+      rememberFolderVfs(dirname(source), folderVfs)
+    schedulePostDeleteCleanup(source, folderVfs)
   })
 
   // ================ Thumbnail Extraction Main Function ================
   const thumbnailQueue = new ThumbnailQueue()
   const pendingTasks = new Map()
 
-  async function extractThumbnailWithDebounce(filePath) {
+  async function extractThumbnailWithDebounce(filePath, vfsFolder) {
+    if (vfsFolder) rememberFolderVfs(dirname(filePath), vfsFolder)
     const key = filePath
     const debounceDelay = api.getConfig('thumbnail_debounce_delay') || 2000
 
@@ -1053,6 +1512,7 @@ exports.init = api => {
         try {
           await fsp.access(coverPath)
           debugLog(`[Cover] Already exists: ${coverPath}`)
+          await mirrorThumbToGraft(coverPath, 'audio')
           return
         } catch {}
 
@@ -1063,6 +1523,7 @@ exports.init = api => {
           params: {}
         })
         debugLog(`[Cover] Extraction complete: ${coverPath}`)
+        await mirrorThumbToGraft(coverPath, 'audio')
         return
       }
 
@@ -1077,6 +1538,7 @@ exports.init = api => {
         try {
           await fsp.access(thumbnailPath)
           debugLog(`[Thumbnail] Already exists: ${thumbnailPath}`)
+          await mirrorThumbToGraft(thumbnailPath, 'video')
           return
         } catch {}
 
@@ -1133,6 +1595,7 @@ exports.init = api => {
           }
 
           debugLog(`[Thumbnail] Complete: ${thumbnailPath}`)
+          await mirrorThumbToGraft(thumbnailPath, 'video')
         } catch (e) {
           debugLog(`[Thumbnail] Failed: ${filePath} - ${e.message}`)
         }
@@ -1198,90 +1661,88 @@ exports.init = api => {
     },
 
     onDirEntry({ entry, node }) {
-      const ext = entry.ext?.toLowerCase()
-      const audioExts = ['mp3', 'flac', 'wav', 'ape', 'aac', 'ogg', 'm4a', 'alac', 'dsf', 'dsd', 'aif', 'aiff', 'opus']
-      const videoExts = ['mp4', 'webm', 'mkv', 'avi', 'mov', 'mpeg', 'mpg', 'wmv', 'rmvb', 'rm', 'dat', 'ts', 'vob', 'flv', 'divx', 'm4v', '3gp']
+      if (node?.isFolder) return
+      const filePath = node?.source
+      if (!filePath) return
 
-      const fileName = stripExt(entry.n)
+      const ext = getFileExtension(filePath)
+      const isAudio = AUDIO_FILE_EXTS.includes(ext)
+      const isVideo = VIDEO_FILE_EXTS.includes(ext)
+      if (!isAudio && !isVideo) return
 
-      const enableGraftMode = api.getConfig('enableGraftMode') || false
-      const graftPath = (api.getConfig('graftPath') || '/images/cache').trim()
-      const graftVideoCovers = api.getConfig('graftVideoCovers') !== false
-      const graftMusicCovers = api.getConfig('graftMusicCovers') !== false
+      const folder = dirname(filePath)
+      const folderVfs = node?.parent?.vfsPath || vfsDirname(node?.vfsPath)
+      if (folderVfs) rememberFolderVfs(folder, folderVfs)
 
-      if (audioExts.includes(ext) || videoExts.includes(ext)) {
-        const filePath = join(node.path, entry.n)
-        extractThumbnailWithDebounce(filePath).catch(e => {
+      const fileName = stripExt(basename(filePath))
+      if (!fileName) return
+
+      // Populate/refresh the graft mirror for already cached thumbnails.
+      if (graftEnabled()) mirrorExistingMediaThumbs(filePath, folderVfs)
+
+      const preferredFormat = api.getConfig('videoThumbFormat') || 'jpg'
+      const canExtract = isAudio ? api.getConfig('extract_covers') : api.getConfig('extract_video_thumbnails')
+      const expectedThumb = isAudio
+        ? join(folder, CACHE_DIR, COVERS_DIR, fileName + '.jpg')
+        : join(folder, CACHE_DIR, VIDEO_THUMBNAIL_DIR, fileName + '.' + preferredFormat)
+      // Avoid the costly extraction path on every listing when the file is
+      // already cached (only reachable for missing thumbnails).
+      if (canExtract && !fs.existsSync(expectedThumb)) {
+        extractThumbnailWithDebounce(filePath, folderVfs).catch(e => {
           debugLog(`Extraction error: ${e.message}`)
         })
       }
 
-      if (audioExts.includes(ext)) {
-        if (enableGraftMode && graftMusicCovers) {
-          const graftCoverPath = join(graftPath, node.path, CACHE_DIR, COVERS_DIR, fileName + '.jpg')
-          if (fs.existsSync(graftCoverPath)) {
-            entry._hasCover = true
-            entry._coverType = 'audio'
-            entry._graftMode = true
-            entry._graftMusicCovers = true
-            entry._graftPath = graftPath
-          }
-        } else {
-          const coverPath = join(node.path, CACHE_DIR, COVERS_DIR, fileName + '.jpg')
-          if (fs.existsSync(coverPath)) {
-            entry._hasCover = true
-            entry._coverType = 'audio'
-            entry._graftMode = false
-            entry._graftMusicCovers = false
-            entry._graftPath = ''
-          }
+      if (isAudio) {
+        if (fs.existsSync(join(folder, CACHE_DIR, COVERS_DIR, fileName + '.jpg'))) {
+          entry._hasCover = true
+          entry._coverType = 'audio'
         }
-      } else if (videoExts.includes(ext)) {
-        const preferred = api.getConfig('videoThumbFormat') || 'jpg'
-        const formats = preferred === 'gif' ? ['gif', 'jpg'] : ['jpg', 'gif']
+        return
+      }
 
-        if (enableGraftMode && graftVideoCovers) {
-          for (const fmt of formats) {
-            const graftThumbPath = join(graftPath, node.path, CACHE_DIR, VIDEO_THUMBNAIL_DIR, fileName + '.' + fmt)
-            if (fs.existsSync(graftThumbPath)) {
-              entry._hasCover = true
-              entry._coverType = 'video'
-              entry._graftMode = true
-              entry._graftVideoCovers = true
-              entry._graftPath = graftPath
-              entry.coverExt = fmt
-              break
-            }
-          }
-        } else {
-          for (const fmt of formats) {
-            const thumbPath = join(node.path, CACHE_DIR, VIDEO_THUMBNAIL_DIR, fileName + '.' + fmt)
-            if (fs.existsSync(thumbPath)) {
-              entry._hasCover = true
-              entry._coverType = 'video'
-              entry._graftMode = false
-              entry._graftVideoCovers = false
-              entry._graftPath = ''
-              entry.coverExt = fmt
-              break
-            }
-          }
+      const formats = preferredFormat === 'gif' ? ['gif', 'jpg'] : ['jpg', 'gif']
+      for (const format of formats) {
+        if (fs.existsSync(join(folder, CACHE_DIR, VIDEO_THUMBNAIL_DIR, `${fileName}.${format}`))) {
+          entry._hasCover = true
+          entry._coverType = 'video'
+          entry.coverExt = format
+          break
         }
       }
     },
 
     middleware: async ctx => {
+      if (graftEnabled()) {
+        try { await materializeGraftFromLocal(ctx.path) }
+        catch (e) { debugLog(`[Graft] Materialize request failed: ${e.message}`) }
+      }
       return async () => {
         const src = ctx.state.fileSource
         if (!src) return
 
         const ext = getFileExtension(src)
+        if (!SUPPORTED_AUDIO_EXTS.includes(ext) && !SUPPORTED_VIDEO_EXTS.includes(ext)) return
 
-        if (SUPPORTED_AUDIO_EXTS.includes(ext) || SUPPORTED_VIDEO_EXTS.includes(ext)) {
-          extractThumbnailWithDebounce(src).catch(e => {
-            debugLog(`Thumbnail extraction error: ${e.message}`)
-          })
+        let folderVfs = ''
+        if (graftEnabled()) {
+          let vfsPath = ctx.state.vfsNode?.vfsPath
+          if (!vfsPath) {
+            try {
+              const { urlToNode } = api.require('./vfs')
+              vfsPath = (await urlToNode(ctx.path, ctx))?.vfsPath
+            } catch (e) {
+              debugLog(`[Graft] Cannot resolve request VFS path: ${e.message}`)
+            }
+          }
+          folderVfs = vfsDirname(vfsPath)
+          if (folderVfs) rememberFolderVfs(dirname(src), folderVfs)
+          mirrorExistingMediaThumbs(src, folderVfs)
         }
+
+        extractThumbnailWithDebounce(src, folderVfs).catch(e => {
+          debugLog(`Thumbnail extraction error: ${e.message}`)
+        })
       }
     }
   }

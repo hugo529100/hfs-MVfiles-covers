@@ -129,32 +129,27 @@
     const urls = [];
 
     if (pluginConfig.enableGraftMode) {
+      if (isAudio && pluginConfig.graftMusicCovers === false) return [];
+      if (isVideo && pluginConfig.graftVideoCovers === false) return [];
       if (isAudio) {
-        if (pluginConfig.graftMusicCovers !== false) {
-          urls.push(`${pluginConfig.graftPath}${baseUri}cache/covers/${name}.jpg?get=thumb`);
-        } else {
-          return [];
-        }
-      } else if (isVideo) {
-        if (pluginConfig.graftVideoCovers !== false) {
-          if (format === 'gif') {
-            urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.gif`);
-          } else {
-            urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.jpg?get=thumb`);
-          }
-        } else {
-          return [];
-        }
-      }
-    } else {
-      if (isAudio) {
-        urls.push(`${baseUri}cache/covers/${name}.jpg?get=thumb`);
+        urls.push(`${pluginConfig.graftPath}${baseUri}cache/covers/${name}.jpg?get=thumb`);
       } else if (isVideo) {
         if (format === 'gif') {
-          urls.push(`${baseUri}cache/videothumbnail/${name}.gif`);
+          urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.gif`);
         } else {
-          urls.push(`${baseUri}cache/videothumbnail/${name}.jpg?get=thumb`);
+          urls.push(`${pluginConfig.graftPath}${baseUri}cache/videothumbnail/${name}.jpg?get=thumb`);
         }
+      }
+    }
+
+    // Local cache is the fallback, and the only source when graft mode is off.
+    if (isAudio) {
+      urls.push(`${baseUri}cache/covers/${name}.jpg?get=thumb`);
+    } else if (isVideo) {
+      if (format === 'gif') {
+        urls.push(`${baseUri}cache/videothumbnail/${name}.gif`);
+      } else {
+        urls.push(`${baseUri}cache/videothumbnail/${name}.jpg?get=thumb`);
       }
     }
 
