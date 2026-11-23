@@ -1,5 +1,5 @@
 exports.repo = "hugo529100/hfs-MVfiles-covers"
-exports.version = 8.0
+exports.version = 8.1
 exports.description = "Complete media cover/thumbnail extraction and display system - supports video GIF/JPG thumbnails and audio cover extraction"
 exports.apiRequired = 12.91
 exports.frontend_js = 'main.js'
@@ -279,6 +279,7 @@ exports.config = {
 exports.configDialog = { maxWidth: '55em' }
 
 exports.changelog = [
+  { version: 8.1, message: "Cover extraction now validates the generated file and degrades: long video → short video → backup → last-resort 0s frame. JPG also falls back to 0s. Empty/invalid outputs are treated as failures." },
   { version: 8.0, message: "Entering a folder only remembers cover candidates. The batch starts when the first video is played: the playing video is converted first, then the rest of the folder, one at a time. Leaving or closing stops the queue." },
   { version: 7.9, message: "Folder listings batch-convert missing covers and mirror existing ones, one video at a time. The batch stops when leaving the folder or closing the page, and missing covers are filled in one by one after the player closes." },
   { version: 7.8, message: "A folder listing no longer generates thumbnails for every video: only the video being played/downloaded is converted. Existing covers are still mirrored on demand." },
@@ -424,10 +425,11 @@ exports.init = api => {
     }
 
     async generateGif(filePath, thumbnailPath, params) {
-      const startTime = params.startTime || 60
-      const duration = params.duration || 10
-      const fps = params.fps || 5
-      const width = params.width || 320
+      // startTime 0 is valid (backup/last-resort); don't replace it with 60.
+      const startTime = params.startTime ?? 60
+      const duration = params.duration ?? 10
+      const fps = params.fps ?? 5
+      const width = params.width ?? 320
 
       debugLog(`[GIF] Params: start=${startTime}s, duration=${duration}s, FPS=${fps}, width=${width}`)
 
@@ -484,16 +486,11 @@ exports.init = api => {
           await fsp.unlink(palettePath).catch(() => {})
 
           if (code === 0) {
-            try {
-              const stats = await fsp.stat(thumbnailPath)
-              if (stats.size > 0) {
-                resolve(true)
-              } else {
-                await fsp.unlink(thumbnailPath).catch(() => {})
-                reject(new Error('Generated GIF is 0 bytes'))
-              }
-            } catch (err) {
-              reject(err)
+            if (await isValidThumbFile(thumbnailPath, 'gif')) {
+              resolve(true)
+            } else {
+              await fsp.unlink(thumbnailPath).catch(() => {})
+              reject(new Error('Generated GIF is invalid or empty'))
             }
           } else {
             await fsp.unlink(thumbnailPath).catch(() => {})
@@ -526,10 +523,15 @@ exports.init = api => {
         let stderr = ''
         proc.stderr.on('data', data => { stderr += data.toString() })
 
-        proc.on('exit', code => {
+        proc.on('exit', async code => {
           cleanupProcess(proc)
           if (code === 0) {
-            resolve(true)
+            if (await isValidThumbFile(thumbnailPath, 'jpg')) {
+              resolve(true)
+            } else {
+              await fsp.unlink(thumbnailPath).catch(() => {})
+              reject(new Error('Generated JPG is invalid or empty'))
+            }
           } else {
             fsp.unlink(thumbnailPath).catch(() => {})
             reject(new Error(`JPG generation failed (${code})`))
@@ -553,10 +555,20 @@ exports.init = api => {
         let stderr = ''
         proc.stderr.on('data', data => { stderr += data.toString() })
 
-        proc.on('exit', code => {
+        proc.on('exit', async code => {
           cleanupProcess(proc)
           if (code === 0) {
-            resolve(true)
+            try {
+              const stats = await fsp.stat(thumbnailPath)
+              if (stats.size > 0) {
+                resolve(true)
+              } else {
+                await fsp.unlink(thumbnailPath).catch(() => {})
+                reject(new Error('Extracted cover is empty'))
+              }
+            } catch (err) {
+              reject(err)
+            }
           } else {
             fsp.unlink(thumbnailPath).catch(() => {})
             reject(new Error(`Cover extraction failed (${code})`))
@@ -676,6 +688,38 @@ exports.init = api => {
         }
       }))
     } catch (e) {}
+  }
+
+  async function readFileHead(filePath, size) {
+    const handle = await fsp.open(filePath, 'r')
+    try {
+      const buffer = Buffer.alloc(size)
+      const { bytesRead } = await handle.read(buffer, 0, size, 0)
+      return buffer.subarray(0, bytesRead)
+    } finally {
+      await handle.close().catch(() => {})
+    }
+  }
+
+  // A file that exists is not necessarily a valid image: ffmpeg can exit 0
+  // while leaving an empty/truncated output. Validate the header so a failed
+  // attempt can degrade to the next parameter set.
+  async function isValidThumbFile(filePath, format) {
+    try {
+      const stats = await fsp.stat(filePath)
+      if (!stats.isFile() || stats.size < 64) return false
+      if (format === 'gif') {
+        const head = await readFileHead(filePath, 3)
+        return head.length === 3 && head.toString('ascii') === 'GIF'
+      }
+      if (format === 'jpg') {
+        const head = await readFileHead(filePath, 2)
+        return head.length === 2 && head[0] === 0xFF && head[1] === 0xD8
+      }
+      return stats.size > 0
+    } catch (e) {
+      return false
+    }
   }
 
   async function cleanupWrongNamedFiles(dir) {
@@ -1798,20 +1842,43 @@ exports.init = api => {
               time = formatTimeFromSeconds(seconds)
             }
 
-            await thumbnailQueue.add({
-              type: 'jpg',
-              filePath,
-              thumbnailPath,
-              params: { time }
-            })
+            let success = false
+            const times = [time, '00:00:00'].filter((value, index, all) => all.indexOf(value) === index)
+            for (const currentTime of times) {
+              try {
+                debugLog(`[Thumbnail] Trying JPG at ${currentTime}`)
+                await thumbnailQueue.add({
+                  type: 'jpg',
+                  filePath,
+                  thumbnailPath,
+                  params: { time: currentTime }
+                })
+                success = true
+                break
+              } catch (error) {
+                debugLog(`[Thumbnail] JPG attempt failed (${currentTime}): ${error.message}`)
+              }
+            }
+            if (!success) {
+              await fsp.unlink(thumbnailPath).catch(() => {})
+              throw new Error('All JPG generation attempts failed')
+            }
           } else {
             let success = false
+            // Final safety net: 0s, very short, low fps and small width.
+            const lastResort = {
+              startTime: 0,
+              duration: 2,
+              fps: 2,
+              width: Math.min(gradientParams.SHORT.width || 320, 160)
+            }
             const attempts = isLongVideo
-              ? [gradientParams.LONG, gradientParams.SHORT, gradientParams.BACKUP]
-              : [gradientParams.SHORT, gradientParams.BACKUP]
+              ? [gradientParams.LONG, gradientParams.SHORT, gradientParams.BACKUP, lastResort]
+              : [gradientParams.SHORT, gradientParams.BACKUP, lastResort]
 
             for (const params of attempts) {
               try {
+                debugLog(`[Thumbnail] Trying GIF start=${params.startTime}s duration=${params.duration}s fps=${params.fps} width=${params.width}`)
                 await thumbnailQueue.add({
                   type: 'gif',
                   filePath,
@@ -1821,7 +1888,7 @@ exports.init = api => {
                 success = true
                 break
               } catch (error) {
-                debugLog(`[Thumbnail] Attempt failed: ${error.message}`)
+                debugLog(`[Thumbnail] GIF attempt failed: ${error.message}`)
               }
             }
 
