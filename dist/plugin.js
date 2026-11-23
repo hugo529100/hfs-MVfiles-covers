@@ -1,4 +1,4 @@
-exports.repo = "Hug3O/MVfiles-covers"
+exports.repo = "hugo529100/hfs-MVfiles-covers"
 exports.version = 7.5
 exports.description = "Complete media cover/thumbnail extraction and display system - supports video GIF/JPG thumbnails and audio cover extraction"
 exports.apiRequired = 12.91
