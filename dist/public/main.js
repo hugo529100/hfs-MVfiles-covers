@@ -33,16 +33,6 @@
 
   let coverLoadEnabled = getCoverLoadState();
 
-  // 全局 retry 监听：现在每个 listener 会收到“是否需要强制重试”的判断，
-  // 只有 err === true 的实例才会真正重试（见 ImgFallback 内注册逻辑）。
-  const globalRetryListeners = new Set();
-
-  function triggerGlobalRetry() {
-    for (const fn of globalRetryListeners) {
-      try { fn(); } catch (e) {}
-    }
-  }
-
   const isListMode = () => {
     const listWrapper = document.querySelector('.list-wrapper');
     if (!listWrapper) return false;
@@ -73,6 +63,16 @@
   const entryDecisionCache = new WeakMap();
   // ★ 新增：entry 级“已加载成功”持久化，抗组件卸载重挂
   const entryLoadedCache = new WeakMap(); // entry -> finalSrc
+  // 播放结束后补封面：按 entry 精确重试，避免整页重载
+  const entryRetryListeners = new WeakMap(); // entry -> Set<retry fn>
+  let lastPlayedEntry = null;
+  let coverPollToken = 0;
+  // 批量轉換後的封面逐個補上（播放中暫停）
+  const missingCoverEntries = new Set();
+  const coverFillAttempts = new WeakMap();
+  let coverFillTimer = null;
+  let coverFillIndex = 0;
+  let coverFillBusy = false;
 
   function normalizeUrlForKey(url) {
     try {
@@ -205,6 +205,172 @@
     if (pluginConfig.enableGraftMode && decision.currentIndex >= decision.allUrls.length) {
       decision.triedUrls.clear();
     }
+  }
+
+  // 清除某个 entry 的封面判定缓存，并通知它的实例立即重试。
+  // 只影响这一个 entry，不调用 reloadList，也不会刷新整页。
+  function retryEntryCover(entry) {
+    if (entryLoadedCache.has(entry)) return; // 已经显示成功，无需重试
+    entryDecisionCache.delete(entry);
+    entryFinalUrlCache.delete(entry);
+    entryLoadedCache.delete(entry);
+    const listeners = entryRetryListeners.get(entry);
+    if (!listeners) return;
+    for (const fn of Array.from(listeners)) {
+      try { fn(); } catch (e) {}
+    }
+  }
+
+  // 播放器关闭后：轮询封面文件，出现后再重试该 entry 的封面。
+  function refreshPlayedCover(entry) {
+    if (!entry) return;
+    const urls = getAllPossibleCoverUrls(entry);
+    if (!urls.length) return;
+    // 以本地封面為準（Graft 開啟時 urls[0] 是鏡像、最後一個是本地），
+    // 本地一出現就重試；鏡像由後端按需補上。
+    const checkUrl = urls[urls.length - 1].split('?')[0];
+    if (!checkUrl) return;
+
+    const token = ++coverPollToken;
+    const startedAt = Date.now();
+    const tick = () => {
+      if (token !== coverPollToken) return;
+      if (Date.now() - startedAt > 300000) return; // 5 分钟后放弃
+      const url = checkUrl + (checkUrl.includes('?') ? '&' : '?') + '_cover_check=' + Date.now();
+      fetch(url, {
+        method: 'HEAD',
+        cache: 'no-store',
+        credentials: 'same-origin'
+      }).then(res => {
+        if (token !== coverPollToken) return;
+        if (res.ok) {
+          retryEntryCover(entry);
+          return;
+        }
+        setTimeout(tick, 2000);
+      }, () => {
+        if (token === coverPollToken) setTimeout(tick, 2000);
+      });
+    };
+    tick();
+  }
+
+  // 从 file-show 播放器读取当前显示的 entry（showPlay 事件的兜底）。
+  function captureShownEntry() {
+    try {
+      const media = document.querySelector('.dialog-backdrop.file-show .showing');
+      const src = media && media.getAttribute && media.getAttribute('src');
+      if (!src) return;
+      const state = HFS.state || {};
+      const candidates = [...(state.filteredList || []), ...(state.list || [])];
+      let found = candidates.find(x => x && x.uri === src);
+      if (!found) {
+        let decoded = src;
+        try { decoded = decodeURIComponent(src); } catch (e) {}
+        found = candidates.find(x => {
+          if (!x || !x.uri) return false;
+          try { return decodeURIComponent(x.uri) === decoded; } catch (e) { return false; }
+        });
+      }
+      if (found) {
+        const ext = (found.ext || '').toLowerCase();
+        if (audioExts.includes(ext) || videoExts.includes(ext)) lastPlayedEntry = found;
+      }
+    } catch (e) {}
+  }
+
+  function handleFileShowClosed() {
+    let entry = lastPlayedEntry;
+    lastPlayedEntry = null;
+    if (!entry) return;
+    // showPlay 的 entry 可能與目前列表中的物件不是同一個實例；
+    // 若該實例沒有掛載中的重試監聽，改用列表中的同 URI entry。
+    if (!entryRetryListeners.has(entry)) {
+      try {
+        const state = HFS.state || {};
+        const candidates = [...(state.filteredList || []), ...(state.list || [])];
+        entry = candidates.find(x => x && x.uri === entry.uri) || entry;
+      } catch (e) {}
+    }
+    refreshPlayedCover(entry);
+  }
+
+  function startCoverFill() {
+    if (coverFillTimer) return;
+    coverFillTimer = setInterval(fillNextCover, 1200);
+  }
+
+  function stopCoverFill() {
+    if (coverFillTimer) clearInterval(coverFillTimer);
+    coverFillTimer = null;
+  }
+
+  // 一次只補一個封面；播放器開啟期間完全避讓。
+  async function fillNextCover() {
+    if (coverFillBusy) return;
+    if (isFileShowMode()) return; // 播放中不補，等播放器結束
+    if (!missingCoverEntries.size) {
+      stopCoverFill();
+      return;
+    }
+    const entries = Array.from(missingCoverEntries);
+    if (!entries.length) {
+      stopCoverFill();
+      return;
+    }
+    const entry = entries[coverFillIndex++ % entries.length];
+    const attempts = coverFillAttempts.get(entry) || 0;
+    if (attempts >= 100) {
+      missingCoverEntries.delete(entry);
+      return;
+    }
+    coverFillAttempts.set(entry, attempts + 1);
+    const urls = getAllPossibleCoverUrls(entry);
+    if (!urls.length) {
+      missingCoverEntries.delete(entry);
+      return;
+    }
+    const checkUrl = urls[urls.length - 1].split('?')[0];
+    if (!checkUrl) return;
+    coverFillBusy = true;
+    try {
+      const res = await fetch(checkUrl + (checkUrl.includes('?') ? '&' : '?') + '_cover_fill=' + Date.now(), {
+        method: 'HEAD',
+        cache: 'no-store',
+        credentials: 'same-origin'
+      });
+      if (res.ok) retryEntryCover(entry);
+    } catch (e) {
+    } finally {
+      coverFillBusy = false;
+    }
+  }
+
+  // 離開頁面時通知後端停止該客戶端的批次
+  function cancelServerBatch() {
+    try {
+      const prefix = HFS.SPECIAL_URI || '/~/';
+      fetch(`${prefix}api/_mvCovers_cancelBatch`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-hfs-anti-csrf': '1' },
+        body: '{}',
+        keepalive: true
+      }).catch(() => {});
+    } catch (e) {}
+  }
+  window.addEventListener('pagehide', cancelServerBatch);
+
+  // 第一個影片開始播放時才啟動批次：當前影片優先，之後才排其餘的
+  function startServerBatch(uri) {
+    if (!uri) return;
+    try {
+      const prefix = HFS.SPECIAL_URI || '/~/';
+      fetch(`${prefix}api/_mvCovers_startBatch`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-hfs-anti-csrf': '1' },
+        body: JSON.stringify({ uri })
+      }).catch(() => {});
+    } catch (e) {}
   }
 
   function insertCoverLoadToggle() {
@@ -353,11 +519,6 @@
         }
       }
     } catch (e) {}
-
-    if (window.__resumeRetryTimer) clearTimeout(window.__resumeRetryTimer);
-    window.__resumeRetryTimer = setTimeout(() => {
-      triggerGlobalRetry();
-    }, 150);
   }
 
   // 监听 scroll-suspended 类移除，补一次恢复（解决“类被移除但没人恢复 src”）
@@ -392,6 +553,7 @@
       try {
         if (isFileShowMode()) {
           suspendThumbnails();
+          captureShownEntry();
         }
       } catch (e) {}
     }, 1000);
@@ -438,8 +600,10 @@
             lastFileShowState = nowFileShow;
             if (nowFileShow) {
               suspendThumbnails();
+              setTimeout(captureShownEntry, 150);
             } else {
               resumeThumbnails();
+              handleFileShowClosed();
             }
           }, 100);
         }
@@ -534,21 +698,42 @@
       };
     }, []);
 
-    // ★ 全局 retry：只有 err === true 的实例才真正重置，避免批量重载
+    // 針對單一 entry 的即時重試（播放結束後補封面用），不影響其他圖片
     HFS.React.useEffect(() => {
-      const fn = () => {
+      const retryNow = () => {
         if (!mountedRef.current) return;
-        // 已成功加载的，一律不参与全局重试
         if (loadedRef.current && localSrcRef.current) return;
-        // 只有真正失败的才重试
-        if (!err) return;
         setErr(false);
         setLoaded(false);
         setRetryKey(prev => prev + 1);
       };
-      globalRetryListeners.add(fn);
-      return () => globalRetryListeners.delete(fn);
-    }, [err]);
+      let set = entryRetryListeners.get(entry);
+      if (!set) {
+        set = new Set();
+        entryRetryListeners.set(entry, set);
+      }
+      set.add(retryNow);
+      return () => {
+        set.delete(retryNow);
+        if (!set.size) entryRetryListeners.delete(entry);
+      };
+    }, [entry]);
+
+    // 記錄目前沒有封面的 entry，交給逐個補圖的佇列（播放中會暫停）
+    HFS.React.useEffect(() => {
+      if (err || !localSrc) {
+        missingCoverEntries.add(entry);
+        startCoverFill();
+      } else {
+        missingCoverEntries.delete(entry);
+        coverFillAttempts.delete(entry);
+      }
+    }, [err, localSrc, entry]);
+
+    HFS.React.useEffect(() => () => {
+      missingCoverEntries.delete(entry);
+      coverFillAttempts.delete(entry);
+    }, [entry]);
 
     HFS.React.useEffect(() => {
       if (imageType === 'native-gif') {
@@ -600,7 +785,8 @@
             el.classList.add('loaded');
             // ★ 持久化到 entry 级缓存，抗卸载重挂
             if (localSrcRef.current) {
-              entryLoadedCache.set(entry, localSrcRef.current);
+              // 保存最終 URL（可能含重試用的 cache-buster），重掛後仍能載入
+              entryLoadedCache.set(entry, el.src || localSrcRef.current);
             }
             const cacheKey = getImageCacheKey(el);
             if (cacheKey) {
@@ -642,9 +828,14 @@
       return fallback && h(fallback);
     }
 
+    // 重試時加上一次性參數，避免瀏覽器沿用先前的 404 快取
+    const displaySrc = retryKey && localSrc
+      ? `${localSrc}${localSrc.includes('?') ? '&' : '?'}_retry=${retryKey}`
+      : localSrc;
+
     return h(tag, {
       ...props,
-      src: localSrc,
+      src: displaySrc,
       ref: (el) => {
         imgRef.current = el;
         if (el) observeImg(el);
@@ -657,6 +848,14 @@
       decoding: 'async'
     });
   }
+
+  // 記錄目前播放的 entry，關閉播放器後補上它的封面；
+  // 同時通知後端：第一個播放才開始批次（當前優先，其餘隨後）。
+  HFS.onEvent('showPlay', ({ entry }) => {
+    if (!entry) return;
+    lastPlayedEntry = entry;
+    startServerBatch(entry.uri);
+  });
 
   HFS.onEvent('listEntry', ({ entry }) => {
     const ext = entry.ext?.toLowerCase();

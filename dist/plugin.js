@@ -1,5 +1,5 @@
 exports.repo = "hugo529100/hfs-MVfiles-covers"
-exports.version = 7.5
+exports.version = 8.0
 exports.description = "Complete media cover/thumbnail extraction and display system - supports video GIF/JPG thumbnails and audio cover extraction"
 exports.apiRequired = 12.91
 exports.frontend_js = 'main.js'
@@ -243,9 +243,9 @@ exports.config = {
     type: 'number',
     min: 1,
     max: 10,
-    defaultValue: 2,
+    defaultValue: 1,
     label: 'Max Concurrent Thumbnail Processes',
-    helperText: 'Maximum number of concurrent FFmpeg thumbnail extraction processes',
+    helperText: 'Maximum number of concurrent FFmpeg thumbnail extraction processes. Default is 1 (one video at a time).',
     xs: 6
   },
   thumbnail_debounce_delay: {
@@ -279,6 +279,11 @@ exports.config = {
 exports.configDialog = { maxWidth: '55em' }
 
 exports.changelog = [
+  { version: 8.0, message: "Entering a folder only remembers cover candidates. The batch starts when the first video is played: the playing video is converted first, then the rest of the folder, one at a time. Leaving or closing stops the queue." },
+  { version: 7.9, message: "Folder listings batch-convert missing covers and mirror existing ones, one video at a time. The batch stops when leaving the folder or closing the page, and missing covers are filled in one by one after the player closes." },
+  { version: 7.8, message: "A folder listing no longer generates thumbnails for every video: only the video being played/downloaded is converted. Existing covers are still mirrored on demand." },
+  { version: 7.7, message: "Cover follow-up after closing the player now updates only the played entry: no list reload and no page refresh" },
+  { version: 7.6, message: "After closing the player, the cover of the file just played is refreshed automatically. Thumbnail extraction now starts as soon as playback begins." },
   { version: 7.5, message: "Switching graft mode on midway now migrates existing covers automatically: a missing graft cover is materialized from the original cache the first time it is requested" },
   { version: 7.4, message: "Graft mode now mirrors thumbnails/covers into the graft path with the full folder hierarchy, removes them together with deleted videos/folders, and cleans orphan mirror files" },
   { version: 7.2, message: "Added 'Auto-clean orphan thumbnails' switch in the System tab, with built-in safety limits. Pause-in-list-mode is now always active and no longer configurable." },
@@ -318,7 +323,7 @@ exports.init = api => {
       this.processedCount = 0
       this.failedCount = 0
       this.isProcessing = false
-      this.maxConcurrent = api.getConfig('max_concurrent_thumbnail') || 2
+      this.maxConcurrent = api.getConfig('max_concurrent_thumbnail') || 1
       this.pendingDebounce = new Map()
       this.processTimers = new Map()
     }
@@ -883,8 +888,8 @@ exports.init = api => {
     return stripFinalSep(resolve(join(mount.source, ...segments)))
   }
 
-  async function getGraftRoot() {
-    if (!graftEnabled()) return ''
+  async function getGraftRoot(allowDisabled = false) {
+    if (!allowDisabled && !graftEnabled()) return ''
     const now = Date.now()
     if (now - graftRootCache.at < 10000) return graftRootCache.path
     let path = ''
@@ -1216,13 +1221,12 @@ exports.init = api => {
     }
 
     // Never treat the graft storage itself as a media cache: browsing the
-    // mirror tree must not delete the mirrors.
-    if (graftEnabled()) {
-      const root = await getGraftRoot()
-      if (root && isInsideFolder(root, folder)) {
-        report.skipped = 'graft-storage'
-        return report
-      }
+    // mirror tree must not delete the mirrors. Protect it even while graft
+    // mode is switched off, so disabling it doesn't expose the mirrors.
+    const graftRoot = await getGraftRoot(true)
+    if (graftRoot && isInsideFolder(graftRoot, folder)) {
+      report.skipped = 'graft-storage'
+      return report
     }
 
     const last = lastFolderScan.get(folder)
@@ -1443,6 +1447,239 @@ exports.init = api => {
     schedulePostDeleteCleanup(source, folderVfs)
   })
 
+  // ================ Batch Conversion / Mirroring ================
+  // A folder listing queues missing covers for conversion and existing covers
+  // for mirroring. Jobs run one at a time, skip anything already present, and
+  // the batch is cancelled when the client lists another folder, leaves the
+  // page, or stays idle too long.
+  const BATCH_IDLE_MS = 5 * 60 * 1000
+  const BATCH_MAX_JOBS = 400
+  const CANDIDATE_IDLE_MS = 30 * 60 * 1000
+  const batchClients = new Map()
+  let batchWorkerRunning = false
+  // Files seen in the current listing, remembered until the first playback.
+  const candidateClients = new Map() // clientKey -> Map(folderKey -> { folder, listUri, files: Map })
+  const candidateActivity = new Map() // clientKey -> timestamp
+
+  function batchClientKey(ctx) {
+    return (api.getCurrentUsername(ctx) || '') + '|' + (ctx?.ip || '')
+  }
+
+  // Only the main GUI list (EventSource) drives batches. Other plugins query
+  // get_file_list as plain JSON and must not start or cancel a batch.
+  function isGuiListRequest(ctx) {
+    return Boolean(ctx && typeof ctx.get === 'function'
+      && String(ctx.get('accept') || '').includes('text/event-stream'))
+  }
+
+  function cancelBatch(batch, reason) {
+    if (!batch || batch.cancelled) return
+    batch.cancelled = true
+    batch.queue.length = 0
+    batch.queued.clear()
+    if (batchClients.get(batch.key) === batch)
+      batchClients.delete(batch.key)
+    debugLog(`[Batch] Cancelled (${reason}): ${batch.listUri}`)
+  }
+
+  function cancelClientBatch(ctx, reason) {
+    cancelBatch(batchClients.get(batchClientKey(ctx)), reason)
+  }
+
+  function rememberCandidate(ctx, listUri, filePath, folder, vfsFolder, kind) {
+    if (cleanupDisposed) return
+    const key = batchClientKey(ctx)
+    let folders = candidateClients.get(key)
+    if (!folders) {
+      folders = new Map()
+      candidateClients.set(key, folders)
+    }
+    const fkey = folderKey(folder)
+    let entry = folders.get(fkey)
+    if (!entry) {
+      entry = { folder, listUri: String(listUri || '/'), files: new Map() }
+      folders.set(fkey, entry)
+    }
+    entry.listUri = String(listUri || entry.listUri || '/')
+    if (entry.files.size < 2000)
+      entry.files.set(filePath, { kind, vfsFolder })
+    if (folders.size > 100) {
+      for (const oldKey of folders.keys()) {
+        folders.delete(oldKey)
+        if (folders.size <= 80) break
+      }
+    }
+    candidateActivity.set(key, Date.now())
+  }
+
+  function candidatesFor(ctx, folder) {
+    const folders = candidateClients.get(batchClientKey(ctx))
+    return folders && folders.get(folderKey(folder))
+  }
+
+  function clearCandidatesForClient(ctx) {
+    const key = batchClientKey(ctx)
+    candidateClients.delete(key)
+    candidateActivity.delete(key)
+  }
+
+  function getBatch(ctx, listUri) {
+    if (cleanupDisposed) return null
+    const key = batchClientKey(ctx)
+    const uri = String(listUri || '/')
+    let batch = batchClients.get(key)
+    if (batch && batch.listUri !== uri) {
+      cancelBatch(batch, 'folder-changed')
+      batch = null
+    }
+    if (!batch) {
+      batch = { key, listUri: uri, queue: [], queued: new Set(), cancelled: false, lastActivity: Date.now() }
+      batchClients.set(key, batch)
+    }
+    batch.lastActivity = Date.now()
+    return batch
+  }
+
+  function queueBatchJob(ctx, listUri, job) {
+    const batch = getBatch(ctx, listUri)
+    if (!batch) return
+    if (batch.queue.length >= BATCH_MAX_JOBS) return
+    const id = job.type + '|' + (job.filePath || job.localPath)
+    if (batch.queued.has(id)) return
+    job.id = id
+    batch.queued.add(id)
+    batch.queue.push(job)
+    batch.lastActivity = Date.now()
+    runBatchWorker()
+  }
+
+  function nextBatchWithJobs() {
+    for (const batch of batchClients.values())
+      if (!batch.cancelled && batch.queue.length)
+        return batch
+    return null
+  }
+
+  async function runBatchWorker() {
+    if (batchWorkerRunning || cleanupDisposed) return
+    batchWorkerRunning = true
+    try {
+      while (!cleanupDisposed) {
+        const batch = nextBatchWithJobs()
+        if (!batch) break
+        const job = batch.queue.shift()
+        batch.queued.delete(job.id)
+        if (batch.cancelled) continue
+        try {
+          if (job.type === 'convert') {
+            const kind = VIDEO_FILE_EXTS.includes(getFileExtension(job.filePath)) ? 'video' : 'audio'
+            if (!existingCoverPath(job.filePath, kind)) {
+              debugLog(`[Batch] Convert: ${basename(job.filePath)}`)
+              await extractThumbnail(job.filePath)
+            }
+          } else if (job.type === 'mirror' && graftEnabled()) {
+            debugLog(`[Batch] Mirror: ${basename(job.localPath)}`)
+            await mirrorThumbToGraft(job.localPath, job.kind)
+          }
+        } catch (e) {
+          debugLog(`[Batch] Job failed: ${e && e.message}`)
+        }
+        await new Promise(r => setImmediate(r))
+      }
+    } finally {
+      batchWorkerRunning = false
+      if (!cleanupDisposed && nextBatchWithJobs()) runBatchWorker()
+    }
+  }
+
+  function existingCoverPath(filePath, kind) {
+    const folder = dirname(filePath)
+    const base = stripExt(basename(filePath))
+    if (kind === 'audio') {
+      const cover = join(folder, CACHE_DIR, COVERS_DIR, base + '.jpg')
+      return fs.existsSync(cover) ? cover : ''
+    }
+    const preferred = api.getConfig('videoThumbFormat') || 'jpg'
+    const formats = preferred === 'gif' ? ['gif', 'jpg'] : ['jpg', 'gif']
+    for (const format of formats) {
+      const thumb = join(folder, CACHE_DIR, VIDEO_THUMBNAIL_DIR, `${base}.${format}`)
+      if (fs.existsSync(thumb)) return thumb
+    }
+    return ''
+  }
+
+  function playbackJob(filePath, vfsFolder, kind) {
+    const cover = existingCoverPath(filePath, kind)
+    if (cover) {
+      if (!graftEnabled()) return null
+      return { type: 'mirror', filePath, localPath: cover, kind }
+    }
+    return { type: 'convert', filePath, vfsFolder }
+  }
+
+  function startBatchForFile(ctx, filePath, vfsFolder, kind) {
+    if (cleanupDisposed) return { started: false }
+    const folder = dirname(filePath)
+    const cand = candidatesFor(ctx, folder)
+    const listUri = cand?.listUri || normalizeVfsFolder(vfsFolder) || '/'
+    const key = batchClientKey(ctx)
+    const existing = batchClients.get(key)
+    if (existing && !existing.cancelled && existing.listUri === listUri)
+      return { started: false, reason: 'already' }
+    if (existing) cancelBatch(existing, 'new-play')
+
+    const batch = getBatch(ctx, listUri)
+
+    // 1) the currently playing file first
+    const first = playbackJob(filePath, vfsFolder, kind)
+    if (first) queueBatchJob(ctx, listUri, first)
+
+    // 2) then the rest of the folder remembered from the listing
+    if (cand) {
+      for (const [path, info] of cand.files) {
+        if (path === filePath) continue
+        const job = playbackJob(path, info.vfsFolder, info.kind)
+        if (job) queueBatchJob(ctx, listUri, job)
+      }
+    }
+    return { started: true, queued: batch.queue.length }
+  }
+
+  async function startPlaybackBatch(ctx, uri) {
+    if (cleanupDisposed) return { started: false }
+    let node
+    try {
+      const vfs = api.require('./vfs')
+      node = await vfs.urlToNode(uri, ctx)
+      if (!node?.source || (vfs.hasPermission && !vfs.hasPermission(node, 'can_read', ctx)))
+        return { started: false }
+    } catch (e) {
+      debugLog(`[Batch] Cannot resolve playback uri: ${e.message}`)
+      return { started: false }
+    }
+    const ext = getFileExtension(node.source)
+    const kind = VIDEO_FILE_EXTS.includes(ext) ? 'video'
+      : AUDIO_FILE_EXTS.includes(ext) ? 'audio' : ''
+    if (!kind) return { started: false }
+    const vfsFolder = vfsDirname(node.vfsPath)
+    if (vfsFolder) rememberFolderVfs(dirname(node.source), vfsFolder)
+    return startBatchForFile(ctx, node.source, vfsFolder, kind)
+  }
+
+  // Idle batches are dropped to protect the server even if the client
+  // disappears without a pagehide event.
+  api.setInterval(() => {
+    const now = Date.now()
+    for (const batch of Array.from(batchClients.values()))
+      if (now - batch.lastActivity > BATCH_IDLE_MS)
+        cancelBatch(batch, 'idle')
+    for (const [key, ts] of candidateActivity)
+      if (now - ts > CANDIDATE_IDLE_MS) {
+        candidateClients.delete(key)
+        candidateActivity.delete(key)
+      }
+  }, 15000)
+
   // ================ Thumbnail Extraction Main Function ================
   const thumbnailQueue = new ThumbnailQueue()
   const pendingTasks = new Map()
@@ -1644,6 +1881,8 @@ exports.init = api => {
   return {
     unload() {
       cleanupDisposed = true
+      for (const batch of Array.from(batchClients.values()))
+        cancelBatch(batch, 'unload')
       folderScanQueue.clear()
       thumbnailQueue.clear()
       for (const [key, value] of pendingTasks) {
@@ -1660,7 +1899,21 @@ exports.init = api => {
       return thumbnailQueue.getStatus()
     },
 
-    onDirEntry({ entry, node }) {
+    // Called by the frontend when the page is being left, so a batch doesn't
+    // continue in the background.
+    customRest: {
+      async mvCovers_startBatch({ uri } = {}, ctx) {
+        if (!uri || typeof uri !== 'string') throw 'missing uri'
+        return await startPlaybackBatch(ctx, uri)
+      },
+      async mvCovers_cancelBatch(_params, ctx) {
+        cancelClientBatch(ctx, 'client-left')
+        clearCandidatesForClient(ctx)
+        return { ok: true }
+      }
+    },
+
+    onDirEntry({ entry, node, ctx, listUri }) {
       if (node?.isFolder) return
       const filePath = node?.source
       if (!filePath) return
@@ -1677,46 +1930,76 @@ exports.init = api => {
       const fileName = stripExt(basename(filePath))
       if (!fileName) return
 
-      // Populate/refresh the graft mirror for already cached thumbnails.
-      if (graftEnabled()) mirrorExistingMediaThumbs(filePath, folderVfs)
-
-      const preferredFormat = api.getConfig('videoThumbFormat') || 'jpg'
-      const canExtract = isAudio ? api.getConfig('extract_covers') : api.getConfig('extract_video_thumbnails')
-      const expectedThumb = isAudio
-        ? join(folder, CACHE_DIR, COVERS_DIR, fileName + '.jpg')
-        : join(folder, CACHE_DIR, VIDEO_THUMBNAIL_DIR, fileName + '.' + preferredFormat)
-      // Avoid the costly extraction path on every listing when the file is
-      // already cached (only reachable for missing thumbnails).
-      if (canExtract && !fs.existsSync(expectedThumb)) {
-        extractThumbnailWithDebounce(filePath, folderVfs).catch(e => {
-          debugLog(`Extraction error: ${e.message}`)
-        })
+      const kind = isAudio ? 'audio' : 'video'
+      const cover = existingCoverPath(filePath, kind)
+      if (cover) {
+        entry._hasCover = true
+        entry._coverType = kind
+        if (isVideo) entry.coverExt = mediaExtName(cover)
       }
 
-      if (isAudio) {
-        if (fs.existsSync(join(folder, CACHE_DIR, COVERS_DIR, fileName + '.jpg'))) {
-          entry._hasCover = true
-          entry._coverType = 'audio'
-        }
-        return
-      }
-
-      const formats = preferredFormat === 'gif' ? ['gif', 'jpg'] : ['jpg', 'gif']
-      for (const format of formats) {
-        if (fs.existsSync(join(folder, CACHE_DIR, VIDEO_THUMBNAIL_DIR, `${fileName}.${format}`))) {
-          entry._hasCover = true
-          entry._coverType = 'video'
-          entry.coverExt = format
-          break
-        }
-      }
+      // Do not convert or mirror on listing. Only remember candidates; the
+      // batch starts when the first video is played.
+      if (isGuiListRequest(ctx))
+        rememberCandidate(ctx, listUri, filePath, folder, folderVfs, kind)
     },
 
     middleware: async ctx => {
+      // Folder navigation cancels the previous folder's batch immediately.
+      // Only the main GUI list (SSE) is considered.
+      if (ctx.path === '/~/api/get_file_list' && isGuiListRequest(ctx)) {
+        const uri = String(ctx.query.uri || '/')
+        const key = batchClientKey(ctx)
+        const batch = batchClients.get(key)
+        if (batch) {
+          if (batch.listUri !== uri) cancelBatch(batch, 'folder-changed')
+          else batch.lastActivity = Date.now()
+        }
+        const folders = candidateClients.get(key)
+        if (folders) {
+          for (const [fkey, cand] of folders)
+            if (cand.listUri !== uri) folders.delete(fkey)
+          if (!folders.size) candidateClients.delete(key)
+        }
+      }
+
       if (graftEnabled()) {
         try { await materializeGraftFromLocal(ctx.path) }
         catch (e) { debugLog(`[Graft] Materialize request failed: ${e.message}`) }
       }
+
+      // Start extraction as soon as a media file is requested (playback or
+      // download), instead of waiting for the response to finish. This way the
+      // cover is usually ready by the time the player is closed.
+      const requestExt = getFileExtension(ctx.path)
+      if (SUPPORTED_AUDIO_EXTS.includes(requestExt) || SUPPORTED_VIDEO_EXTS.includes(requestExt)) {
+        try {
+          const vfs = api.require('./vfs')
+          const node = await vfs.urlToNode(ctx.path, ctx)
+          if (node?.source && (!vfs.hasPermission || vfs.hasPermission(node, 'can_read', ctx))) {
+            const folderVfs = vfsDirname(node.vfsPath)
+            if (folderVfs) rememberFolderVfs(dirname(node.source), folderVfs)
+            const ext = getFileExtension(node.source)
+            const kind = VIDEO_FILE_EXTS.includes(ext) ? 'video'
+              : AUDIO_FILE_EXTS.includes(ext) ? 'audio' : ''
+            if (kind) {
+              const dest = String(ctx.get('sec-fetch-dest') || '')
+              if (dest === 'video' || dest === 'audio') {
+                // Real playback request: start the folder batch with this file first.
+                startBatchForFile(ctx, node.source, folderVfs, kind)
+              } else {
+                // Download/other request: at most convert this one file.
+                extractThumbnailWithDebounce(node.source, folderVfs).catch(e => {
+                  debugLog(`Thumbnail extraction error: ${e.message}`)
+                })
+              }
+            }
+          }
+        } catch (e) {
+          debugLog(`[Media] Cannot resolve request ${ctx.path}: ${e.message}`)
+        }
+      }
+
       return async () => {
         const src = ctx.state.fileSource
         if (!src) return
