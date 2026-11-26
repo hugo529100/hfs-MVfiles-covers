@@ -1,5 +1,5 @@
 exports.repo = "hugo529100/hfs-MVfiles-covers"
-exports.version = 8.7
+exports.version = 8.9
 exports.description = "Complete media cover/thumbnail extraction and display system - supports video GIF/JPG thumbnails and audio cover extraction"
 exports.apiRequired = 12.91
 exports.frontend_js = 'main.js'
@@ -279,6 +279,8 @@ exports.config = {
 exports.configDialog = { maxWidth: '55em' }
 
 exports.changelog = [
+  { version: 8.9, message: "thumbnail-fade cooperation: the one-time gate releases covers in small batches (6 per 40ms) so they fade in progressively instead of all at once. The viewport marker is persisted as data-in-view so React re-renders don't wipe it; file-show suspension now keeps visible covers intact." },
+  { version: 8.8, message: "Hybrid GIF loading: after the one-time stats gate, GIF covers within about one viewport (600-1000px) load immediately; farther GIFs stay lazy and load when they approach. Loaded covers are never unloaded; non-GIF covers keep their original behavior." },
   { version: 8.7, message: "Restored the 12.8-era frontend's eager image/scroll behavior and added a one-time release gate: no covers while the first get_file_list/#folder-stats is loading; release immediately when it ends; later stats/loading changes never re-block. Only a new folder re-arms the gate." },
   { version: 8.6, message: "Statistics blocking is now one-time: covers stay off only while the first list statistics/loading is active. The moment it finishes, covers are released immediately, and later stats/loading changes (lazy pages, scrolling) no longer block them." },
   { version: 8.5, message: "After the list stats finish, covers now preload about one viewport beyond the visible area, and scrolling settles in 250ms. This keeps covers ready before they scroll into view without loading during the list build." },

@@ -64,9 +64,19 @@
   const coverGateListeners = new Set();
 
   function notifyCoverGate() {
-    for (const fn of coverGateListeners) {
-      try { fn(); } catch (e) {}
-    }
+    // 分批放行：避免統計完成瞬間 50 張同時 mount，thumbnail-fade 會整片先隱藏再一起淡入
+    const listeners = Array.from(coverGateListeners);
+    let index = 0;
+    const runBatch = () => {
+      const end = Math.min(listeners.length, index + 6);
+      for (; index < end; index++) {
+        const fn = listeners[index];
+        if (!coverGateListeners.has(fn)) continue;
+        try { fn(); } catch (e) {}
+      }
+      if (index < listeners.length) setTimeout(runBatch, 40);
+    };
+    runBatch();
   }
 
   function startCoverGateMonitor() {
@@ -492,10 +502,12 @@
         const img = e.target;
         if (!(img instanceof HTMLElement)) continue;
         if (e.isIntersecting) {
+          img.dataset.inView = '1';
           img.classList.add('in-view');
           // ★ 回到视口：如果之前被 suspend 剥掉了 src，尝试恢复
           restoreSuspendedSrc(img);
         } else {
+          img.dataset.inView = '0';
           img.classList.remove('in-view');
         }
       }
@@ -561,7 +573,8 @@
       const imgs = document.querySelectorAll('img.thumbnail.passthrough');
       for (const img of imgs) {
         // ★ 只挂起不在视口内的；视口内保留，避免已加载的 GIF 被剥掉
-        if (img.classList.contains('in-view')) continue;
+        // data-in-view 不會被 React 的 className 重繪洗掉
+        if (img.dataset.inView === '1' || img.classList.contains('in-view')) continue;
         // 已经是挂起状态的不重复处理
         if (img.classList.contains('thumbnail-suspended') && !img.getAttribute('src')) continue;
 
@@ -583,7 +596,7 @@
       const imgs = document.querySelectorAll('img.thumbnail.passthrough');
       for (const img of imgs) {
         // 视口内的优先恢复；非视口内的交给 IntersectionObserver / 下次滚动
-        if (img.classList.contains('in-view')) {
+        if (img.dataset.inView === '1' || img.classList.contains('in-view')) {
           restoreSuspendedSrc(img);
         } else if (img.dataset.suspendedSrc) {
           // 非视口内：仅当滚动层不再挂起时才恢复，否则保留备份等待
@@ -738,8 +751,10 @@
     const [loaded, setLoaded] = HFS.React.useState(false);
     const [retryKey, setRetryKey] = HFS.React.useState(0);
     const [gateTick, setGateTick] = HFS.React.useState(0);
+    const [near, setNear] = HFS.React.useState(false);
     const mountedRef = HFS.React.useRef(true);
     const imgRef = HFS.React.useRef(null);
+    const hostRef = HFS.React.useRef(null);
 
     const loadedRef = HFS.React.useRef(false);
     const localSrcRef = HFS.React.useRef('');
@@ -753,7 +768,7 @@
     }, [localSrc]);
 
     const isGifCover = isCoverGif(entry);
-    // ★ GIF 不再用原生 lazy，改由自定义 IntersectionObserver + suspend 控制
+    // ★ GIF 混合載入：可見＋約一個畫面內的先載入，遠的 lazy，載入後不卸載
     const lazyLoading = false;
 
     const imageType = HFS.React.useMemo(() => {
@@ -767,6 +782,35 @@
       const isCover = url && (url.includes('/cache/covers/') || url.includes('/cache/videothumbnail/'));
       return isCover ? 'cover' : 'regular';
     }, [entry]);
+
+    const isGifType = imageType === 'cover-gif' || imageType === 'native-gif';
+
+    // 只對 GIF 做「接近視口才載入」；非 GIF 維持原本的立即載入
+    HFS.React.useEffect(() => {
+      if (!isGifType || near || !coverGate.open) return;
+      const el = hostRef.current;
+      if (!el) return;
+      let cancelled = false;
+      let observer = null;
+      const margin = Math.min(1000, Math.max(600, Math.round(window.innerHeight || 600)));
+      try {
+        observer = new IntersectionObserver((entries) => {
+          if (cancelled) return;
+          for (const e of entries) {
+            if (!e.isIntersecting) continue;
+            cancelled = true;
+            observer.disconnect();
+            setNear(true);
+            return;
+          }
+        }, { root: null, rootMargin: `${margin}px 0px`, threshold: 0.01 });
+        observer.observe(el);
+      } catch (e) {}
+      return () => {
+        cancelled = true;
+        if (observer) observer.disconnect();
+      };
+    }, [isGifType, near, coverGate.open, gateTick]);
 
     HFS.React.useEffect(() => {
       return () => {
@@ -808,6 +852,13 @@
 
     // 記錄目前沒有封面的 entry，交給逐個補圖的佇列（播放中會暫停）
     HFS.React.useEffect(() => {
+      // 遠處還沒接近的 GIF 是「刻意 lazy」，不要當成缺封面去排隊
+      const lazyPending = isGifType && !near && !entryLoadedCache.has(entry);
+      if (lazyPending) {
+        missingCoverEntries.delete(entry);
+        coverFillAttempts.delete(entry);
+        return;
+      }
       if (err || !localSrc) {
         missingCoverEntries.add(entry);
         startCoverFill();
@@ -815,7 +866,7 @@
         missingCoverEntries.delete(entry);
         coverFillAttempts.delete(entry);
       }
-    }, [err, localSrc, entry]);
+    }, [err, localSrc, entry, isGifType, near]);
 
     HFS.React.useEffect(() => () => {
       missingCoverEntries.delete(entry);
@@ -824,6 +875,8 @@
 
     HFS.React.useEffect(() => {
       if (!coverGate.open) return;
+      // 遠處的 GIF 等接近視口（或已載入過）才開始載入
+      if (isGifType && !near && !entryLoadedCache.has(entry)) return;
       if (imageType === 'native-gif') {
         setLocalSrc(entry.uri);
         return;
@@ -852,7 +905,7 @@
       } else {
         setErr(true);
       }
-    }, [entry, retryKey, imageType, gateTick]);
+    }, [entry, retryKey, imageType, gateTick, near]);
 
     // ★ 挂载后开始视口观察
     HFS.React.useEffect(() => {
@@ -913,7 +966,12 @@
     // ★ 命中 entry 级缓存时直接显示已加载态，跳过 loading 空窗
     const cachedLoadedSrc = entryLoadedCache.get(entry);
     if (err || !localSrc) {
-      return fallback && h(fallback);
+      if (!fallback) return null;
+      const fallbackEl = fallback();
+      if (fallbackEl && typeof fallbackEl === 'object' && fallbackEl.type) {
+        return h(fallbackEl.type, { ...fallbackEl.props, ref: hostRef });
+      }
+      return fallbackEl;
     }
 
     // 重試時加上一次性參數，避免瀏覽器沿用先前的 404 快取
