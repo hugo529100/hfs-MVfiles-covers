@@ -1,5 +1,5 @@
 exports.repo = "hugo529100/hfs-MVfiles-covers"
-exports.version = 8.1
+exports.version = 8.7
 exports.description = "Complete media cover/thumbnail extraction and display system - supports video GIF/JPG thumbnails and audio cover extraction"
 exports.apiRequired = 12.91
 exports.frontend_js = 'main.js'
@@ -279,7 +279,13 @@ exports.config = {
 exports.configDialog = { maxWidth: '55em' }
 
 exports.changelog = [
-  { version: 8.1, message: "Cover extraction now validates the generated file and degrades: long video → short video → backup → last-resort 0s frame. JPG also falls back to 0s. Empty/invalid outputs are treated as failures." },
+  { version: 8.7, message: "Restored the 12.8-era frontend's eager image/scroll behavior and added a one-time release gate: no covers while the first get_file_list/#folder-stats is loading; release immediately when it ends; later stats/loading changes never re-block. Only a new folder re-arms the gate." },
+  { version: 8.6, message: "Statistics blocking is now one-time: covers stay off only while the first list statistics/loading is active. The moment it finishes, covers are released immediately, and later stats/loading changes (lazy pages, scrolling) no longer block them." },
+  { version: 8.5, message: "After the list stats finish, covers now preload about one viewport beyond the visible area, and scrolling settles in 250ms. This keeps covers ready before they scroll into view without loading during the list build." },
+  { version: 8.4, message: "Covers now stay unloaded while HFS is still loading/calculating the list (HFS.state.loading, the #folder-stats spinner), not only while its text changes. After loading ends and 500ms of stability, only visible covers are loaded." },
+  { version: 8.3, message: "Cover loading now follows #folder-stats: while the stats text is still changing, no covers are loaded. Once it has been stable for 800ms and scrolling has stopped, only visible covers are loaded." },
+  { version: 8.2, message: "Covers are no longer requested while get_file_list builds the list. After the list settles and scrolling stops, only covers inside the visible area are loaded (both vertical and horizontal); scrolling does not stream additional covers." },
+  { version: 8.1, message: "Cover extraction now validates the generated file and degrades: long video 鈫?short video 鈫?backup 鈫?last-resort 0s frame. JPG also falls back to 0s. Empty/invalid outputs are treated as failures." },
   { version: 8.0, message: "Entering a folder only remembers cover candidates. The batch starts when the first video is played: the playing video is converted first, then the rest of the folder, one at a time. Leaving or closing stops the queue." },
   { version: 7.9, message: "Folder listings batch-convert missing covers and mirror existing ones, one video at a time. The batch stops when leaving the folder or closing the page, and missing covers are filled in one by one after the player closes." },
   { version: 7.8, message: "A folder listing no longer generates thumbnails for every video: only the video being played/downloaded is converted. Existing covers are still mirrored on demand." },
@@ -1922,19 +1928,19 @@ exports.init = api => {
 
     return new Promise((resolve) => {
       proc.on('error', () => {
-        api.log('[Thumbnail] ⚠️ FFmpeg not found. Please configure the correct path.')
+        api.log('[Thumbnail] 鈿狅笍 FFmpeg not found. Please configure the correct path.')
         ffmpegReady = false
         resolve(false)
       })
       proc.on('exit', (code) => {
         if (code === 0) {
           if (api.getConfig('debug_ffmpeg')) {
-            api.log('[Thumbnail] ✅ FFmpeg ready')
+            api.log('[Thumbnail] 鉁?FFmpeg ready')
           }
           ffmpegReady = true
           resolve(true)
         } else {
-          api.log('[Thumbnail] ⚠️ FFmpeg version check failed')
+          api.log('[Thumbnail] 鈿狅笍 FFmpeg version check failed')
           ffmpegReady = false
           resolve(false)
         }

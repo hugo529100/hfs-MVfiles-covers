@@ -48,6 +48,80 @@
     return !isListMode();
   };
 
+  // ============================================================
+  // 一次性放行閘門：
+  // 第一次 get_file_list／#folder-stats 統計還在進行時不載入封面；
+  // 一放行就永久放行，之後的滾動／追加／stats 再變都不再關閘。
+  // 只有換到新資料夾才重新武裝一次。
+  // ============================================================
+  const coverGate = {
+    open: false,
+    hasActivity: false,
+    statsText: undefined,
+    entriesAllowedAt: 0,
+    token: 0
+  };
+  const coverGateListeners = new Set();
+
+  function notifyCoverGate() {
+    for (const fn of coverGateListeners) {
+      try { fn(); } catch (e) {}
+    }
+  }
+
+  function startCoverGateMonitor() {
+    const token = ++coverGate.token;
+    const loop = () => {
+      if (token !== coverGate.token || coverGate.open) return;
+      const loading = Boolean(HFS.state && HFS.state.loading);
+      const statsElement = document.getElementById('folder-stats');
+      const statsText = statsElement ? statsElement.textContent : '';
+
+      if (loading) coverGate.hasActivity = true;
+
+      if (coverGate.statsText === undefined) {
+        coverGate.statsText = statsText;
+        if (statsText) coverGate.hasActivity = true;
+      } else if (statsText !== coverGate.statsText) {
+        coverGate.statsText = statsText;
+        if (statsText) coverGate.hasActivity = true;
+      }
+
+      // 其他主題沒有 stats／loading 訊號時，列表出現後仍可放行
+      if (!coverGate.hasActivity && Date.now() >= coverGate.entriesAllowedAt
+        && document.querySelectorAll('li.file, [data-uri]').length > 0) {
+        coverGate.hasActivity = true;
+      }
+
+      if (coverGate.hasActivity && !loading) {
+        coverGate.open = true;
+        notifyCoverGate();
+        return;
+      }
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }
+
+  function resetCoverGate(forNavigation) {
+    coverGate.open = false;
+    coverGate.hasActivity = false;
+    coverGate.statsText = undefined;
+    coverGate.entriesAllowedAt = forNavigation ? Date.now() + 300 : 0;
+    if (forNavigation) {
+      const statsElement = document.getElementById('folder-stats');
+      coverGate.statsText = statsElement ? statsElement.textContent : '';
+    }
+    startCoverGateMonitor();
+  }
+
+  if (HFS.onEvent) {
+    HFS.onEvent('newListEntries', () => { coverGate.hasActivity = true; });
+  }
+  if (HFS.watchState) {
+    HFS.watchState('uri', () => resetCoverGate(true));
+  }
+
   const debugMode = false;
   if (!debugMode) {
     console.log = function() {};
@@ -308,6 +382,7 @@
   // 一次只補一個封面；播放器開啟期間完全避讓。
   async function fillNextCover() {
     if (coverFillBusy) return;
+    if (!coverGate.open) return;
     if (isFileShowMode()) return; // 播放中不補，等播放器結束
     if (!missingCoverEntries.size) {
       stopCoverFill();
@@ -622,6 +697,7 @@
     setupScrollSuspendObserver();
     startFileShowHeartbeat();
     ensureViewportObserver();
+    resetCoverGate(false);
 
     const observer = new MutationObserver(() => {
       if (document.querySelector('.dialog-title')?.textContent?.includes('Options')) {
@@ -661,6 +737,7 @@
     const [localSrc, setLocalSrc] = HFS.React.useState('');
     const [loaded, setLoaded] = HFS.React.useState(false);
     const [retryKey, setRetryKey] = HFS.React.useState(0);
+    const [gateTick, setGateTick] = HFS.React.useState(0);
     const mountedRef = HFS.React.useRef(true);
     const imgRef = HFS.React.useRef(null);
 
@@ -719,6 +796,16 @@
       };
     }, [entry]);
 
+    // 一次性閘門放行時，讓所有已掛載的封面重新嘗試載入
+    HFS.React.useEffect(() => {
+      const onGate = () => {
+        if (loadedRef.current && localSrcRef.current) return;
+        setGateTick(value => value + 1);
+      };
+      coverGateListeners.add(onGate);
+      return () => coverGateListeners.delete(onGate);
+    }, []);
+
     // 記錄目前沒有封面的 entry，交給逐個補圖的佇列（播放中會暫停）
     HFS.React.useEffect(() => {
       if (err || !localSrc) {
@@ -736,6 +823,7 @@
     }, [entry]);
 
     HFS.React.useEffect(() => {
+      if (!coverGate.open) return;
       if (imageType === 'native-gif') {
         setLocalSrc(entry.uri);
         return;
@@ -764,7 +852,7 @@
       } else {
         setErr(true);
       }
-    }, [entry, retryKey, imageType]);
+    }, [entry, retryKey, imageType, gateTick]);
 
     // ★ 挂载后开始视口观察
     HFS.React.useEffect(() => {
