@@ -1,5 +1,5 @@
 exports.repo = "hugo529100/hfs-MVfiles-covers"
-exports.version = 8.9
+exports.version = 9.1
 exports.description = "Complete media cover/thumbnail extraction and display system - supports video GIF/JPG thumbnails and audio cover extraction"
 exports.apiRequired = 12.91
 exports.frontend_js = 'main.js'
@@ -279,6 +279,7 @@ exports.config = {
 exports.configDialog = { maxWidth: '55em' }
 
 exports.changelog = [
+  { version: 9.0, message: "Cleanup improvements: entering a folder runs the cooled-down orphan scan; deleting a video immediately removes its thumbnails without waiting for the cooldown (independent of the auto-clean switch), then prunes empty cache/videothumbnail and cache folders locally and in graft mode. DELETE requests no longer schedule thumbnail extraction; extraction verifies the source before creating cache folders." },
   { version: 8.9, message: "thumbnail-fade cooperation: the one-time gate releases covers in small batches (6 per 40ms) so they fade in progressively instead of all at once. The viewport marker is persisted as data-in-view so React re-renders don't wipe it; file-show suspension now keeps visible covers intact." },
   { version: 8.8, message: "Hybrid GIF loading: after the one-time stats gate, GIF covers within about one viewport (600-1000px) load immediately; farther GIFs stay lazy and load when they approach. Loaded covers are never unloaded; non-GIF covers keep their original behavior." },
   { version: 8.7, message: "Restored the 12.8-era frontend's eager image/scroll behavior and added a one-time release gate: no covers while the first get_file_list/#folder-stats is loading; release immediately when it ends; later stats/loading changes never re-block. Only a new folder re-arms the gate." },
@@ -287,7 +288,7 @@ exports.changelog = [
   { version: 8.4, message: "Covers now stay unloaded while HFS is still loading/calculating the list (HFS.state.loading, the #folder-stats spinner), not only while its text changes. After loading ends and 500ms of stability, only visible covers are loaded." },
   { version: 8.3, message: "Cover loading now follows #folder-stats: while the stats text is still changing, no covers are loaded. Once it has been stable for 800ms and scrolling has stopped, only visible covers are loaded." },
   { version: 8.2, message: "Covers are no longer requested while get_file_list builds the list. After the list settles and scrolling stops, only covers inside the visible area are loaded (both vertical and horizontal); scrolling does not stream additional covers." },
-  { version: 8.1, message: "Cover extraction now validates the generated file and degrades: long video 鈫?short video 鈫?backup 鈫?last-resort 0s frame. JPG also falls back to 0s. Empty/invalid outputs are treated as failures." },
+  { version: 8.1, message: "Cover extraction now validates the generated file and degrades: long video 閳?short video 閳?backup 閳?last-resort 0s frame. JPG also falls back to 0s. Empty/invalid outputs are treated as failures." },
   { version: 8.0, message: "Entering a folder only remembers cover candidates. The batch starts when the first video is played: the playing video is converted first, then the rest of the folder, one at a time. Leaving or closing stops the queue." },
   { version: 7.9, message: "Folder listings batch-convert missing covers and mirror existing ones, one video at a time. The batch stops when leaving the folder or closing the page, and missing covers are filled in one by one after the player closes." },
   { version: 7.8, message: "A folder listing no longer generates thumbnails for every video: only the video being played/downloaded is converted. Existing covers are still mirrored on demand." },
@@ -1260,6 +1261,39 @@ exports.init = api => {
     }
   }
 
+  async function removeEmptyCacheDir(dir) {
+    try {
+      const entries = await fsp.readdir(dir)
+      if (entries.length) return false
+      await fsp.rmdir(dir)
+      debugLog(`[Cleanup] Removed empty folder: ${dir}`)
+      return true
+    } catch (e) {
+      if (e.code !== 'ENOENT' && e.code !== 'ENOTEMPTY')
+        debugLog(`[Cleanup] Cannot remove empty folder ${dir}: ${e.message}`)
+      return false
+    }
+  }
+
+  // After a scan/deletion, drop the generated folders once they are empty:
+  // <folder>/cache/videothumbnail, <folder>/cache/covers, then cache itself.
+  async function pruneEmptyCacheDirs(folder, graft) {
+    if (cleanupDisposed || !folder) return
+    let cachePath
+    if (graft) {
+      if (!graftEnabled()) return
+      const root = await getGraftRoot()
+      const segments = decodedSegments(folderVfsFor(folder))
+      if (!root || !segments || !segments.length) return
+      cachePath = join(root, ...segments, CACHE_DIR)
+    } else {
+      cachePath = join(folder, CACHE_DIR)
+    }
+    await removeEmptyCacheDir(join(cachePath, VIDEO_THUMBNAIL_DIR))
+    await removeEmptyCacheDir(join(cachePath, COVERS_DIR))
+    await removeEmptyCacheDir(cachePath)
+  }
+
   // Check and clean a single folder (non recursive: every folder has its own cache).
   async function reconcileFolder(folder) {
     const report = { deleted: 0, freedBytes: 0, skipped: '' }
@@ -1323,6 +1357,7 @@ exports.init = api => {
       if (!cleanupEnabled()) break
       await cleanCacheDir(join(folder, CACHE_DIR, target.subDir), target, media, report)
     }
+    await pruneEmptyCacheDirs(folder, false)
 
     // Clean the mirrored copy as well, when graft mode is active and the
     // folder can be mapped back to its VFS path.
@@ -1335,6 +1370,7 @@ exports.init = api => {
           if (target.kind === 'audio' && !graftMusicEnabled()) continue
           await cleanCacheDir(join(root, ...segments, CACHE_DIR, target.subDir), target, media, report)
         }
+        await pruneEmptyCacheDirs(folder, true)
       }
     }
     return report
@@ -1445,18 +1481,22 @@ exports.init = api => {
       result.deleted += graft.deleted
       result.freedBytes += graft.freedBytes
     }
+
+    await pruneEmptyCacheDirs(folder, false)
+    if (graftEnabled())
+      await pruneEmptyCacheDirs(folder, true)
     return result
   }
 
   function schedulePostDeleteCleanup(filePath, vfsFolder) {
     let attempts = 0
     const check = async () => {
-      if (cleanupDisposed || !cleanupEnabled()) return
+      if (cleanupDisposed) return
       attempts++
       // HFS emits "deleting" before removing the file: wait for the removal.
       const exists = await fsp.access(filePath).then(() => true, () => false)
       if (exists) {
-        if (attempts < 3) api.setTimeout(check, 1500)
+        if (attempts < 10) api.setTimeout(check, 250)
         return
       }
       try {
@@ -1467,7 +1507,7 @@ exports.init = api => {
         debugLog(`[Cleanup] Post-delete cleanup failed: ${e && e.message}`)
       }
     }
-    api.setTimeout(check, 1200)
+    api.setTimeout(check, 300)
   }
 
   // Register the two triggers.
@@ -1479,7 +1519,7 @@ exports.init = api => {
   })
 
   api.events.on('deleting', ({ node }) => {
-    if (cleanupDisposed || !cleanupEnabled()) return
+    if (cleanupDisposed) return
     const source = node?.source
     if (!source) return
 
@@ -1783,6 +1823,21 @@ exports.init = api => {
     if (isAudio && !api.getConfig('extract_covers')) return
     if (isVideo && !api.getConfig('extract_video_thumbnails')) return
 
+    // Do not create cache folders for a source that is already gone: the
+    // post-delete cleanup may have pruned them, and a stale debounce must not
+    // recreate cache/videothumbnail.
+    let sourceStats
+    try {
+      sourceStats = await fsp.stat(filePath)
+    } catch (e) {
+      debugLog(`[Thumbnail] Skip missing source: ${filePath}`)
+      return
+    }
+    if (!sourceStats.isFile() || sourceStats.size === 0) {
+      debugLog(`[Thumbnail] Skip empty source: ${filePath}`)
+      return
+    }
+
     try {
       const dir = dirname(filePath)
       const cacheDir = join(dir, CACHE_DIR)
@@ -1930,19 +1985,19 @@ exports.init = api => {
 
     return new Promise((resolve) => {
       proc.on('error', () => {
-        api.log('[Thumbnail] 鈿狅笍 FFmpeg not found. Please configure the correct path.')
+        api.log('[Thumbnail] 閳跨媴绗?FFmpeg not found. Please configure the correct path.')
         ffmpegReady = false
         resolve(false)
       })
       proc.on('exit', (code) => {
         if (code === 0) {
           if (api.getConfig('debug_ffmpeg')) {
-            api.log('[Thumbnail] 鉁?FFmpeg ready')
+            api.log('[Thumbnail] 閴?FFmpeg ready')
           }
           ffmpegReady = true
           resolve(true)
         } else {
-          api.log('[Thumbnail] 鈿狅笍 FFmpeg version check failed')
+          api.log('[Thumbnail] 閳跨媴绗?FFmpeg version check failed')
           ffmpegReady = false
           resolve(false)
         }
@@ -2046,32 +2101,36 @@ exports.init = api => {
       // Start extraction as soon as a media file is requested (playback or
       // download), instead of waiting for the response to finish. This way the
       // cover is usually ready by the time the player is closed.
-      const requestExt = getFileExtension(ctx.path)
-      if (SUPPORTED_AUDIO_EXTS.includes(requestExt) || SUPPORTED_VIDEO_EXTS.includes(requestExt)) {
-        try {
-          const vfs = api.require('./vfs')
-          const node = await vfs.urlToNode(ctx.path, ctx)
-          if (node?.source && (!vfs.hasPermission || vfs.hasPermission(node, 'can_read', ctx))) {
-            const folderVfs = vfsDirname(node.vfsPath)
-            if (folderVfs) rememberFolderVfs(dirname(node.source), folderVfs)
-            const ext = getFileExtension(node.source)
-            const kind = VIDEO_FILE_EXTS.includes(ext) ? 'video'
-              : AUDIO_FILE_EXTS.includes(ext) ? 'audio' : ''
-            if (kind) {
-              const dest = String(ctx.get('sec-fetch-dest') || '')
-              if (dest === 'video' || dest === 'audio') {
-                // Real playback request: start the folder batch with this file first.
-                startBatchForFile(ctx, node.source, folderVfs, kind)
-              } else {
-                // Download/other request: at most convert this one file.
-                extractThumbnailWithDebounce(node.source, folderVfs).catch(e => {
-                  debugLog(`Thumbnail extraction error: ${e.message}`)
-                })
+      // Only real reads: a DELETE (video removal) must never schedule extraction
+      // or it would recreate cache/videothumbnail after the cleanup pruned it.
+      if (ctx.method === 'GET' || ctx.method === 'HEAD') {
+        const requestExt = getFileExtension(ctx.path)
+        if (SUPPORTED_AUDIO_EXTS.includes(requestExt) || SUPPORTED_VIDEO_EXTS.includes(requestExt)) {
+          try {
+            const vfs = api.require('./vfs')
+            const node = await vfs.urlToNode(ctx.path, ctx)
+            if (node?.source && (!vfs.hasPermission || vfs.hasPermission(node, 'can_read', ctx))) {
+              const folderVfs = vfsDirname(node.vfsPath)
+              if (folderVfs) rememberFolderVfs(dirname(node.source), folderVfs)
+              const ext = getFileExtension(node.source)
+              const kind = VIDEO_FILE_EXTS.includes(ext) ? 'video'
+                : AUDIO_FILE_EXTS.includes(ext) ? 'audio' : ''
+              if (kind) {
+                const dest = String(ctx.get('sec-fetch-dest') || '')
+                if (dest === 'video' || dest === 'audio') {
+                  // Real playback request: start the folder batch with this file first.
+                  startBatchForFile(ctx, node.source, folderVfs, kind)
+                } else {
+                  // Download/other request: at most convert this one file.
+                  extractThumbnailWithDebounce(node.source, folderVfs).catch(e => {
+                    debugLog(`Thumbnail extraction error: ${e.message}`)
+                  })
+                }
               }
             }
+          } catch (e) {
+            debugLog(`[Media] Cannot resolve request ${ctx.path}: ${e.message}`)
           }
-        } catch (e) {
-          debugLog(`[Media] Cannot resolve request ${ctx.path}: ${e.message}`)
         }
       }
 
